@@ -1,23 +1,10 @@
+// src/app/page.tsx
 "use client";
 
-import { useMemo, useState } from "react";
-import { CompanyInfo, DarfRecord } from "@/types/darf";
+import { useMemo, useState, type ChangeEvent } from "react";
+import type { CompanyInfo, DarfRecord } from "@/types/darf";
 import { generateSantanderRemittance } from "@/utils/remittance";
-
-const initialCompany: CompanyInfo = {
-  banco: "033",
-  agencia: "",
-  dvAgencia: "",
-  conta: "",
-  dvConta: "",
-  convenio: "",
-  empresa: "",
-  cnpj: "",
-};
-
-const bankOptions = [
-  { label: "Banco Santander", value: "033" },
-];
+import { validateSantanderRemittance } from "@/utils/cnab240Validator";
 
 function formatCurrency(value: number) {
   return value.toLocaleString("pt-BR", {
@@ -27,39 +14,44 @@ function formatCurrency(value: number) {
 }
 
 function sanitizeDocument(value: string) {
-  return value.replace(/\D/g, "");
+  return (value ?? "").replace(/\D/g, "");
 }
 
-function validateCompany(company: CompanyInfo) {
-  const missing: string[] = [];
-  if (!company.banco) missing.push("Banco");
-  if (!company.agencia) missing.push("AgÃªncia");
-  if (!company.dvAgencia) missing.push("DV da agÃªncia");
-  if (!company.conta) missing.push("Conta");
-  if (!company.dvConta) missing.push("DÃ­gito da conta");
-  if (!company.convenio) missing.push("ConvÃªnio");
-  if (!company.empresa) missing.push("Empresa");
-  if (!company.cnpj) missing.push("CNPJ");
-  return missing;
-}
+const initialCompany: CompanyInfo = {
+  banco: "033",
+  agencia: "3601",
+  dvAgencia: "0",
+  conta: "13004606",
+  dvConta: "4",
+  convenio: "4907424402",
+  empresa: "CENTILLION LTDA",
+  cnpj: "39614753000122",
+};
 
-export default function Home() {
+const bankOptions = [{ label: "Banco Santander", value: "033" }];
+
+export default function Page() {
   const [company, setCompany] = useState<CompanyInfo>(initialCompany);
   const [darfs, setDarfs] = useState<DarfRecord[]>([]);
-  const [paymentDate, setPaymentDate] = useState("");
+  const [paymentDate, setPaymentDate] = useState<string>("");
   const [isUploading, setIsUploading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [validationMessage, setValidationMessage] = useState<string | null>(null);
+  const [diagNotes, setDiagNotes] = useState<string[]>([]);
+  const [diagErrors, setDiagErrors] = useState<string[]>([]);
 
   const summary = useMemo(() => {
-    const byCodigo = new Map<string, {
-      codigoReceita: string;
-      quantidade: number;
-      valorPrincipal: number;
-      valorMulta: number;
-      valorJuros: number;
-      valorTotal: number;
-    }>();
+    const byCodigo = new Map<
+      string,
+      {
+        codigoReceita: string;
+        quantidade: number;
+        valorPrincipal: number;
+        valorMulta: number;
+        valorJuros: number;
+        valorTotal: number;
+      }
+    >();
 
     let totalGuias = 0;
     let totalPrincipal = 0;
@@ -102,19 +94,19 @@ export default function Home() {
     };
   }, [darfs]);
 
-  const handleCompanyChange = (field: keyof CompanyInfo, value: string) => {
+  function handleCompanyChange(field: keyof CompanyInfo, value: string) {
     setCompany((current) => ({ ...current, [field]: value }));
-  };
+  }
 
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  async function handleFileUpload(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
-    if (!file) {
-      return;
-    }
+    if (!file) return;
 
     setIsUploading(true);
     setErrorMessage(null);
     setValidationMessage(null);
+    setDiagNotes([]);
+    setDiagErrors([]);
 
     try {
       const formData = new FormData();
@@ -126,31 +118,40 @@ export default function Home() {
       });
 
       const payload = await response.json();
+
       if (!response.ok) {
         throw new Error(payload.message ?? "Falha ao processar o arquivo enviado.");
       }
 
-      const sanitizedDarfs: DarfRecord[] = payload.darfs.map((darf: DarfRecord) => ({
-        ...darf,
-        cnpj: sanitizeDocument(darf.cnpj),
+      const sanitizedDarfs: DarfRecord[] = payload.darfs.map((d: DarfRecord) => ({
+        ...d,
+        cnpj: sanitizeDocument(d.cnpj),
+        codigoReceita: sanitizeDocument(d.codigoReceita),
+        numeroReferencia: sanitizeDocument(d.numeroReferencia),
       }));
 
       setDarfs(sanitizedDarfs);
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "NÃ£o foi possÃ­vel analisar o arquivo enviado.";
+        error instanceof Error
+          ? error.message
+          : "Não foi possível analisar o arquivo enviado.";
+
       setErrorMessage(message);
       setDarfs([]);
     } finally {
       setIsUploading(false);
       event.target.value = "";
     }
-  };
+  }
 
-  const handleGenerateRemittance = () => {
-    const missingFields = validateCompany(company);
-    if (missingFields.length > 0) {
-      setValidationMessage(`Preencha os campos obrigatÃ³rios: ${missingFields.join(", ")}.`);
+  function handleGenerateRemittance() {
+    setValidationMessage(null);
+    setDiagNotes([]);
+    setDiagErrors([]);
+
+    if (!darfs.length) {
+      setValidationMessage("Importe um PDF com ao menos uma guia de DARF antes de gerar a remessa.");
       return;
     }
 
@@ -159,17 +160,25 @@ export default function Home() {
       return;
     }
 
-    if (!darfs.length) {
-      setValidationMessage("Importe um PDF com ao menos uma guia de DARF antes de gerar a remessa.");
-      return;
-    }
-
     try {
       const remittance = generateSantanderRemittance(company, darfs, paymentDate);
+
+      const diag = validateSantanderRemittance(remittance, {
+        expectedBankCode: company.banco,
+        expectedServiceType: "22",
+        expectedLaunchType: "16",
+        expectedPaymentDate: paymentDate,
+        uiTotal: summary.totalGeral,
+      });
+
+      setDiagNotes(diag.notes);
+      setDiagErrors(diag.errors);
+
       const blob = new Blob([remittance], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       const timestamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+
       link.href = url;
       link.download = `REM_${timestamp}.rem`;
       document.body.appendChild(link);
@@ -177,44 +186,53 @@ export default function Home() {
       link.remove();
       URL.revokeObjectURL(url);
 
-      setValidationMessage("Arquivo de remessa gerado com sucesso!");
+      setValidationMessage(
+        diag.ok
+          ? "Arquivo de remessa gerado e validado com sucesso!"
+          : "Arquivo gerado com observações — verifique o mini-validador.",
+      );
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "Nao foi possivel gerar o arquivo de remessa.";
+        error instanceof Error
+          ? error.message
+          : "Não foi possível gerar o arquivo remessa.";
+
       setValidationMessage(message);
     }
-  };
+  }
 
-  const handleReset = () => {
+  function handleReset() {
     setDarfs([]);
     setErrorMessage(null);
     setValidationMessage(null);
-  };
+    setDiagNotes([]);
+    setDiagErrors([]);
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <header className="border-b border-slate-200 bg-white shadow-sm">
-        <div className="mx-auto flex max-w-6xl flex-col gap-3 px-6 py-8 sm:flex-row sm:items-center sm:justify-between">
+        <div className="mx-auto flex max-w-7xl flex-col gap-3 px-6 py-8 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h1 className="text-2xl font-bold text-slate-900 sm:text-3xl">
               Conversor de DARF para Arquivo CNAB
             </h1>
             <p className="text-sm text-slate-500 sm:text-base">
-              Importe um PDF com suas guias de DARF sem cÃ³digo de barras, visualize o relatÃ³rio
-              consolidado e gere o arquivo de remessa para o Banco Santander.
+              Importe DARFs em PDF, confira o relatório consolidado e gere a remessa CNAB 240
+              do Santander com a data de pagamento informada no formulário.
             </p>
           </div>
           <div className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white">
-            VersÃ£o 1.0 Â· Santander
+            Segmento N · DARF sem código de barras
           </div>
         </div>
       </header>
 
-      <main className="mx-auto flex max-w-6xl flex-col gap-6 px-6 py-8">
+      <main className="mx-auto flex max-w-7xl flex-col gap-6 px-6 py-8">
         <section className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-          <h2 className="text-lg font-semibold text-slate-900">InformaÃ§Ãµes para o arquivo CNAB</h2>
+          <h2 className="text-lg font-semibold text-slate-900">Informações do arquivo CNAB</h2>
           <p className="mt-1 text-sm text-slate-500">
-            Preencha os dados obrigatÃ³rios conforme o convÃªnio estabelecido com o banco.
+            A data de vencimento vem do campo 06 do DARF. A data de pagamento é informada abaixo.
           </p>
 
           <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -223,7 +241,7 @@ export default function Home() {
               <select
                 className="rounded-md border border-slate-300 bg-white px-3 py-2 text-slate-900 focus:border-slate-500 focus:outline-none"
                 value={company.banco}
-                onChange={(event) => handleCompanyChange("banco", event.target.value)}
+                onChange={(e) => handleCompanyChange("banco", e.target.value)}
               >
                 {bankOptions.map((option) => (
                   <option key={option.value} value={option.value}>
@@ -234,22 +252,30 @@ export default function Home() {
             </label>
 
             <label className="flex flex-col gap-1 text-sm font-medium text-slate-600">
-              AgÃªncia
+              Data de pagamento
               <input
+                type="date"
                 className="rounded-md border border-slate-300 px-3 py-2 focus:border-slate-500 focus:outline-none"
-                value={company.agencia}
-                onChange={(event) => handleCompanyChange("agencia", event.target.value)}
-                placeholder="0000"
+                value={paymentDate}
+                onChange={(e) => setPaymentDate(e.target.value)}
               />
             </label>
 
             <label className="flex flex-col gap-1 text-sm font-medium text-slate-600">
-              DÃ­gito da AgÃªncia
+              Agência
+              <input
+                className="rounded-md border border-slate-300 px-3 py-2 focus:border-slate-500 focus:outline-none"
+                value={company.agencia}
+                onChange={(e) => handleCompanyChange("agencia", e.target.value)}
+              />
+            </label>
+
+            <label className="flex flex-col gap-1 text-sm font-medium text-slate-600">
+              Dígito da Agência
               <input
                 className="rounded-md border border-slate-300 px-3 py-2 focus:border-slate-500 focus:outline-none"
                 value={company.dvAgencia}
-                onChange={(event) => handleCompanyChange("dvAgencia", event.target.value)}
-                placeholder="0"
+                onChange={(e) => handleCompanyChange("dvAgencia", e.target.value)}
               />
             </label>
 
@@ -258,28 +284,25 @@ export default function Home() {
               <input
                 className="rounded-md border border-slate-300 px-3 py-2 focus:border-slate-500 focus:outline-none"
                 value={company.conta}
-                onChange={(event) => handleCompanyChange("conta", event.target.value)}
-                placeholder="000000"
+                onChange={(e) => handleCompanyChange("conta", e.target.value)}
               />
             </label>
 
             <label className="flex flex-col gap-1 text-sm font-medium text-slate-600">
-              DÃ­gito da Conta
+              Dígito da Conta
               <input
                 className="rounded-md border border-slate-300 px-3 py-2 focus:border-slate-500 focus:outline-none"
                 value={company.dvConta}
-                onChange={(event) => handleCompanyChange("dvConta", event.target.value)}
-                placeholder="0"
+                onChange={(e) => handleCompanyChange("dvConta", e.target.value)}
               />
             </label>
 
             <label className="flex flex-col gap-1 text-sm font-medium text-slate-600">
-              ConvÃªnio
+              Convênio
               <input
                 className="rounded-md border border-slate-300 px-3 py-2 focus:border-slate-500 focus:outline-none"
                 value={company.convenio}
-                onChange={(event) => handleCompanyChange("convenio", event.target.value)}
-                placeholder="Informe o convÃªnio"
+                onChange={(e) => handleCompanyChange("convenio", e.target.value)}
               />
             </label>
 
@@ -288,8 +311,7 @@ export default function Home() {
               <input
                 className="rounded-md border border-slate-300 px-3 py-2 focus:border-slate-500 focus:outline-none"
                 value={company.empresa}
-                onChange={(event) => handleCompanyChange("empresa", event.target.value)}
-                placeholder="Nome da empresa"
+                onChange={(e) => handleCompanyChange("empresa", e.target.value)}
               />
             </label>
 
@@ -298,23 +320,8 @@ export default function Home() {
               <input
                 className="rounded-md border border-slate-300 px-3 py-2 focus:border-slate-500 focus:outline-none"
                 value={company.cnpj}
-                onChange={(event) => handleCompanyChange("cnpj", event.target.value)}
-                placeholder="00.000.000/0000-00"
+                onChange={(e) => handleCompanyChange("cnpj", e.target.value)}
               />
-            </label>
-
-            <label className="flex flex-col gap-1 text-sm font-medium text-slate-600">
-              Data de pagamento
-              <input
-                type="date"
-                className="rounded-md border border-slate-300 px-3 py-2 text-slate-900 focus:border-slate-500 focus:outline-none"
-                value={paymentDate}
-                onChange={(event) => setPaymentDate(event.target.value)}
-                required
-              />
-              <span className="text-xs font-normal text-slate-500">
-                Obrigatoria para a remessa. O vencimento continua vindo do campo 06 do DARF.
-              </span>
             </label>
           </div>
         </section>
@@ -324,9 +331,10 @@ export default function Home() {
             <div>
               <h2 className="text-lg font-semibold text-slate-900">Importar PDF de DARF</h2>
               <p className="text-sm text-slate-500">
-                O arquivo deve conter guias sem cÃ³digo de barras. Cada upload substitui os dados atuais.
+                Cada upload substitui os dados atuais.
               </p>
             </div>
+
             <div className="flex gap-3">
               <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-100">
                 {isUploading ? "Processando..." : "Selecionar PDF"}
@@ -338,13 +346,14 @@ export default function Home() {
                   disabled={isUploading}
                 />
               </label>
+
               {darfs.length > 0 && (
                 <button
                   type="button"
                   onClick={handleReset}
                   className="rounded-md border border-slate-200 bg-slate-100 px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-200"
                 >
-                  Limpar relatÃ³rio
+                  Limpar relatório
                 </button>
               )}
             </div>
@@ -357,15 +366,15 @@ export default function Home() {
           )}
 
           {darfs.length > 0 && (
-            <div className="mt-6 overflow-hidden rounded-lg border border-slate-200">
-              <table className="min-w-full divide-y divide-slate-200 text-sm">
+            <div className="mt-6 overflow-x-auto rounded-lg border border-slate-200">
+              <table className="min-w-[1100px] divide-y divide-slate-200 text-sm">
                 <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                   <tr>
                     <th className="px-4 py-3 text-left">Nome</th>
-                    <th className="px-4 py-3 text-left">PerÃ­odo</th>
+                    <th className="px-4 py-3 text-left">Período</th>
                     <th className="px-4 py-3 text-left">CNPJ</th>
-                    <th className="px-4 py-3 text-left">CÃ³d. Receita</th>
-                    <th className="px-4 py-3 text-left">ReferÃªncia</th>
+                    <th className="px-4 py-3 text-left">Cód. Receita</th>
+                    <th className="px-4 py-3 text-left">Referência</th>
                     <th className="px-4 py-3 text-left">Vencimento</th>
                     <th className="px-4 py-3 text-right">Principal</th>
                     <th className="px-4 py-3 text-right">Multa</th>
@@ -382,11 +391,9 @@ export default function Home() {
                       <td className="px-4 py-3 text-slate-600">{darf.codigoReceita}</td>
                       <td className="px-4 py-3 text-slate-600">{darf.numeroReferencia}</td>
                       <td className="px-4 py-3 text-slate-600">{darf.dataVencimento}</td>
-                      <td className="px-4 py-3 text-right font-medium text-slate-700">
-                        {formatCurrency(darf.valorPrincipal)}
-                      </td>
-                      <td className="px-4 py-3 text-right text-slate-600">{formatCurrency(darf.valorMulta)}</td>
-                      <td className="px-4 py-3 text-right text-slate-600">{formatCurrency(darf.valorJuros)}</td>
+                      <td className="px-4 py-3 text-right">{formatCurrency(darf.valorPrincipal)}</td>
+                      <td className="px-4 py-3 text-right">{formatCurrency(darf.valorMulta)}</td>
+                      <td className="px-4 py-3 text-right">{formatCurrency(darf.valorJuros)}</td>
                       <td className="px-4 py-3 text-right font-semibold text-slate-900">
                         {formatCurrency(darf.valorTotal)}
                       </td>
@@ -401,16 +408,13 @@ export default function Home() {
         {darfs.length > 0 && (
           <section className="grid gap-6 lg:grid-cols-[2fr,1fr]">
             <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-              <h3 className="text-lg font-semibold text-slate-900">RelatÃ³rio consolidado</h3>
-              <p className="mt-1 text-sm text-slate-500">
-                Totais por cÃ³digo de receita com detalhamento de principal, multa, juros e valor total.
-              </p>
+              <h3 className="text-lg font-semibold text-slate-900">Relatório consolidado</h3>
 
-              <div className="mt-6 overflow-hidden rounded-lg border border-slate-200">
-                <table className="min-w-full divide-y divide-slate-200 text-sm">
+              <div className="mt-6 overflow-x-auto rounded-lg border border-slate-200">
+                <table className="min-w-[900px] divide-y divide-slate-200 text-sm">
                   <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                     <tr>
-                      <th className="px-4 py-3 text-left">CÃ³digo da Receita</th>
+                      <th className="px-4 py-3 text-left">Código da Receita</th>
                       <th className="px-4 py-3 text-right">Quantidade</th>
                       <th className="px-4 py-3 text-right">Principal</th>
                       <th className="px-4 py-3 text-right">Multa</th>
@@ -454,7 +458,7 @@ export default function Home() {
 
             <div className="flex flex-col gap-4">
               <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-                <h3 className="text-lg font-semibold text-slate-900">Resumo rÃ¡pido</h3>
+                <h3 className="text-lg font-semibold text-slate-900">Resumo rápido</h3>
                 <dl className="mt-4 space-y-3 text-sm text-slate-600">
                   <div className="flex items-center justify-between">
                     <dt>Quantidade de guias</dt>
@@ -462,9 +466,7 @@ export default function Home() {
                   </div>
                   <div className="flex items-center justify-between">
                     <dt>Total do principal</dt>
-                    <dd className="font-semibold text-slate-900">
-                      {formatCurrency(summary.totalPrincipal)}
-                    </dd>
+                    <dd className="font-semibold text-slate-900">{formatCurrency(summary.totalPrincipal)}</dd>
                   </div>
                   <div className="flex items-center justify-between">
                     <dt>Total de multa</dt>
@@ -476,9 +478,7 @@ export default function Home() {
                   </div>
                   <div className="flex items-center justify-between border-t border-slate-200 pt-3">
                     <dt>Valor total</dt>
-                    <dd className="text-lg font-bold text-slate-900">
-                      {formatCurrency(summary.totalGeral)}
-                    </dd>
+                    <dd className="text-lg font-bold text-slate-900">{formatCurrency(summary.totalGeral)}</dd>
                   </div>
                 </dl>
               </div>
@@ -486,13 +486,7 @@ export default function Home() {
               <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
                 <h3 className="text-lg font-semibold text-slate-900">Gerar arquivo remessa</h3>
                 <p className="mt-1 text-sm text-slate-500">
-                  Revise as informaÃ§Ãµes antes de validar. O arquivo serÃ¡ gerado no padrÃ£o CNAB 240 do
-                  Santander.
-                </p>
-
-                <p className="mt-3 rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-500">
-                  O vencimento vem do campo 06 do DARF. A data de pagamento usada no CNAB vem do
-                  formulario acima.
+                  O vencimento vai do PDF. A data de pagamento vai do formulário.
                 </p>
 
                 <button
@@ -515,6 +509,38 @@ export default function Home() {
                   </div>
                 )}
               </div>
+
+              {(diagNotes.length > 0 || diagErrors.length > 0) && (
+                <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
+                  <h3 className="text-lg font-semibold text-slate-900">Mini-validador CNAB 240</h3>
+
+                  {diagErrors.length > 0 ? (
+                    <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                      <p className="font-semibold">Atenção — foram encontrados problemas</p>
+                      <ul className="mt-2 list-inside list-disc space-y-1">
+                        {diagErrors.map((error, index) => (
+                          <li key={index}>{error}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : (
+                    <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
+                      <p className="font-semibold">OK — sem erros detectados</p>
+                    </div>
+                  )}
+
+                  {diagNotes.length > 0 && (
+                    <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                      <p className="font-semibold">Notas</p>
+                      <ul className="mt-2 list-inside list-disc space-y-1">
+                        {diagNotes.map((note, index) => (
+                          <li key={index}>{note}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </section>
         )}

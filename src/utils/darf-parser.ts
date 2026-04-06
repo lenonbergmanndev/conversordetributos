@@ -1,28 +1,19 @@
 import { randomUUID } from "node:crypto";
-import type { DarfRecord } from "../types/darf";
+import type { DarfRecord } from "@/types/darf";
 
 const moneyRe = /^\d{1,3}(?:\.\d{3})*,\d{2}$/;
 const dateRe = /^\d{2}\/\d{2}\/\d{4}$/;
-const codeRe = /^\d{4}$/;
-const refRe = /^\d{5,}$/;
+const codeRe = /^\d{4,6}$/;
+const refRe = /^\d{5,17}$/;
 const viaRe = /^[12]a\.\s*via$/i;
 const cnpjStrictRe = /\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b/;
 
 function onlyDigits(value: string) {
-  return value.replace(/\D/g, "");
-}
-
-function isDocumentLine(value: string) {
-  if (dateRe.test(value)) {
-    return false;
-  }
-
-  const digits = onlyDigits(value);
-  return digits.length === 11 || digits.length === 14;
+  return (value ?? "").replace(/\D/g, "");
 }
 
 function sanitizeLine(value: string) {
-  return value.replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
+  return (value ?? "").replace(/\u00A0/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function removeDiacritics(value: string) {
@@ -39,7 +30,12 @@ function parseMoney(value: string) {
   return Number.isFinite(parsed) ? Number(parsed.toFixed(2)) : 0;
 }
 
-function clampTotal(valorPrincipal: number, valorMulta: number, valorJuros: number, valorTotal: number) {
+function clampTotal(
+  valorPrincipal: number,
+  valorMulta: number,
+  valorJuros: number,
+  valorTotal: number,
+) {
   const calculated = Number((valorPrincipal + valorMulta + valorJuros).toFixed(2));
   if (valorTotal <= 0 || Math.abs(valorTotal - calculated) > 0.05) {
     return calculated;
@@ -47,15 +43,29 @@ function clampTotal(valorPrincipal: number, valorMulta: number, valorJuros: numb
   return valorTotal;
 }
 
+function isDocumentLine(value: string) {
+  if (dateRe.test(value)) {
+    return false;
+  }
+
+  const digits = onlyDigits(value);
+  return digits.length === 11 || digits.length === 14;
+}
+
 function keepOnlyFirstViaInBlock(block: string) {
   const lines = block.split("\n");
-  const secondViaIndex = lines.findIndex((line) => viaRe.test(sanitizeLine(line)) && /2a\./i.test(line));
+  const secondViaIndex = lines.findIndex(
+    (line) => viaRe.test(sanitizeLine(line)) && /2a\./i.test(line),
+  );
 
   if (secondViaIndex === -1) {
     return block.trim();
   }
 
-  const firstViaIndex = lines.findIndex((line) => viaRe.test(sanitizeLine(line)) && /1a\./i.test(line));
+  const firstViaIndex = lines.findIndex(
+    (line) => viaRe.test(sanitizeLine(line)) && /1a\./i.test(line),
+  );
+
   if (firstViaIndex !== -1 && firstViaIndex < secondViaIndex) {
     return lines.slice(0, secondViaIndex).join("\n").trim();
   }
@@ -64,7 +74,7 @@ function keepOnlyFirstViaInBlock(block: string) {
 }
 
 function splitBlocks(text: string) {
-  const cleaned = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const cleaned = (text ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const delimiter =
     /(?=^\s*MINIST[ÉE]RIO DA FAZENDA)|(?=^\s*DOCUMENTO DE ARRECADA[ÇC][AÃ]O)/im;
 
@@ -113,7 +123,11 @@ function isNameCandidate(line: string, normalized: string) {
     normalized.includes("DARF EMITIDO") ||
     normalized.includes("AUTENTICACAO") ||
     normalized.includes("OBSERVACOES") ||
-    normalized.includes("DATA LIMITE")
+    normalized.includes("DATA LIMITE") ||
+    normalized.includes("MINISTERIO") ||
+    normalized.includes("SECRETARIA") ||
+    normalized.includes("DOCUMENTO DE ARRECADACAO") ||
+    normalized === "DARF"
   ) {
     return false;
   }
@@ -131,34 +145,67 @@ function parseBlock(block: string): DarfRecord | null {
     return null;
   }
 
-  const codeLabelIndex = lines.findIndex((line) => normalizeLine(line) === "CODIGO DA RECEITA");
+  const codeLabelIndex = lines.findIndex(
+    (line) => normalizeLine(line) === "CODIGO DA RECEITA",
+  );
   if (codeLabelIndex === -1) {
     return null;
   }
 
-  const codeIndex = findNextIndex(lines, codeLabelIndex + 1, lines.length, (line) => codeRe.test(line));
+  const codeIndex = findNextIndex(
+    lines,
+    codeLabelIndex + 1,
+    lines.length,
+    (line) => codeRe.test(onlyDigits(line)),
+  );
   if (codeIndex === -1) {
     return null;
   }
 
-  const referenceIndex = findNextIndex(lines, codeIndex + 1, lines.length, (line) => refRe.test(line));
+  const referenceIndex = findNextIndex(
+    lines,
+    codeIndex + 1,
+    lines.length,
+    (line) => refRe.test(onlyDigits(line)),
+  );
+
+  // Vencimento = primeira data após a referência e antes do primeiro valor monetário.
+  // Isso impede pegar "Data limite para acolhimento".
+  const firstMoneyAfterReference =
+    referenceIndex === -1
+      ? -1
+      : findNextIndex(
+          lines,
+          referenceIndex + 1,
+          lines.length,
+          (line) => moneyRe.test(line),
+        );
+
   const dueDateIndex =
     referenceIndex === -1
       ? -1
-      : findNextIndex(lines, referenceIndex + 1, lines.length, (line) => dateRe.test(line));
+      : findNextIndex(
+          lines,
+          referenceIndex + 1,
+          firstMoneyAfterReference === -1 ? lines.length : firstMoneyAfterReference,
+          (line) => dateRe.test(line),
+        );
 
   const principalIndex =
-    dueDateIndex === -1
+    firstMoneyAfterReference === -1
       ? -1
-      : findNextIndex(lines, dueDateIndex + 1, lines.length, (line) => moneyRe.test(line));
+      : findNextIndex(lines, firstMoneyAfterReference, lines.length, (line) => moneyRe.test(line));
+
   const multaIndex =
     principalIndex === -1
       ? -1
       : findNextIndex(lines, principalIndex + 1, lines.length, (line) => moneyRe.test(line));
+
   const jurosIndex =
     multaIndex === -1
       ? -1
       : findNextIndex(lines, multaIndex + 1, lines.length, (line) => moneyRe.test(line));
+
   const totalIndex =
     jurosIndex === -1
       ? -1
@@ -196,10 +243,15 @@ function parseBlock(block: string): DarfRecord | null {
   const record: DarfRecord = {
     id: randomUUID(),
     nome: nameIndex === -1 ? "" : lines[nameIndex],
-    periodoApuracao: periodIndex === -1 ? (dueDateIndex === -1 ? "" : lines[dueDateIndex]) : lines[periodIndex],
+    periodoApuracao:
+      periodIndex === -1
+        ? dueDateIndex === -1
+          ? ""
+          : lines[dueDateIndex]
+        : lines[periodIndex],
     cnpj: cnpjIndex === -1 ? "" : lines[cnpjIndex],
-    codigoReceita: lines[codeIndex],
-    numeroReferencia: referenceIndex === -1 ? "" : lines[referenceIndex],
+    codigoReceita: onlyDigits(lines[codeIndex]),
+    numeroReferencia: referenceIndex === -1 ? "" : onlyDigits(lines[referenceIndex]),
     dataVencimento: dueDateIndex === -1 ? "" : lines[dueDateIndex],
     valorPrincipal,
     valorMulta,
@@ -207,7 +259,7 @@ function parseBlock(block: string): DarfRecord | null {
     valorTotal: totalAjustado,
   };
 
-  if (!codeRe.test(record.codigoReceita) || totalAjustado <= 0 || !record.dataVencimento) {
+  if (!record.codigoReceita || totalAjustado <= 0 || !record.dataVencimento) {
     return null;
   }
 
@@ -234,7 +286,7 @@ export function parseDarfs(text: string) {
       record.valorMulta.toFixed(2),
       record.valorJuros.toFixed(2),
       record.valorTotal.toFixed(2),
-      record.cnpj,
+      onlyDigits(record.cnpj),
     ].join("|");
 
     if (unique.has(key)) {
