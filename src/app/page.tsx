@@ -46,6 +46,7 @@ function validateCompany(company: CompanyInfo) {
 export default function Home() {
   const [company, setCompany] = useState<CompanyInfo>(initialCompany);
   const [darfs, setDarfs] = useState<DarfRecord[]>([]);
+  const [paymentDate, setPaymentDate] = useState("");
   const [isUploading, setIsUploading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [validationMessage, setValidationMessage] = useState<string | null>(null);
@@ -153,24 +154,35 @@ export default function Home() {
       return;
     }
 
+    if (!paymentDate) {
+      setValidationMessage("Informe a data de pagamento antes de gerar a remessa.");
+      return;
+    }
+
     if (!darfs.length) {
       setValidationMessage("Importe um PDF com ao menos uma guia de DARF antes de gerar a remessa.");
       return;
     }
 
-    const remittance = generateSantanderRemittance(company, darfs);
-    const blob = new Blob([remittance], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    const timestamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
-    link.href = url;
-    link.download = `REM_${timestamp}.rem`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
+    try {
+      const remittance = generateSantanderRemittance(company, darfs, paymentDate);
+      const blob = new Blob([remittance], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const timestamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+      link.href = url;
+      link.download = `REM_${timestamp}.rem`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
 
-    setValidationMessage("Arquivo de remessa gerado com sucesso!");
+      setValidationMessage("Arquivo de remessa gerado com sucesso!");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Nao foi possivel gerar o arquivo de remessa.";
+      setValidationMessage(message);
+    }
   };
 
   const handleReset = () => {
@@ -289,6 +301,20 @@ export default function Home() {
                 onChange={(event) => handleCompanyChange("cnpj", event.target.value)}
                 placeholder="00.000.000/0000-00"
               />
+            </label>
+
+            <label className="flex flex-col gap-1 text-sm font-medium text-slate-600">
+              Data de pagamento
+              <input
+                type="date"
+                className="rounded-md border border-slate-300 px-3 py-2 text-slate-900 focus:border-slate-500 focus:outline-none"
+                value={paymentDate}
+                onChange={(event) => setPaymentDate(event.target.value)}
+                required
+              />
+              <span className="text-xs font-normal text-slate-500">
+                Obrigatoria para a remessa. O vencimento continua vindo do campo 06 do DARF.
+              </span>
             </label>
           </div>
         </section>
@@ -462,6 +488,11 @@ export default function Home() {
                 <p className="mt-1 text-sm text-slate-500">
                   Revise as informaÃ§Ãµes antes de validar. O arquivo serÃ¡ gerado no padrÃ£o CNAB 240 do
                   Santander.
+                </p>
+
+                <p className="mt-3 rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                  O vencimento vem do campo 06 do DARF. A data de pagamento usada no CNAB vem do
+                  formulario acima.
                 </p>
 
                 <button

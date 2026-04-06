@@ -15,7 +15,12 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Conversor de DARF",
   description:
-    "Converta guias de DARF sem cÃ³digo de barras em arquivos CNAB prontos para remessa bancÃ¡ria.",
+    "Converta guias de DARF sem codigo de barras em arquivos CNAB prontos para remessa bancaria.",
+  icons: {
+    icon: "/icon.svg",
+    shortcut: "/icon.svg",
+    apple: "/icon.svg",
+  },
 };
 
 export default function RootLayout({
