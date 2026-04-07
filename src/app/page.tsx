@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import type { CompanyInfo, DarfRecord } from "@/types/darf";
 import { generateSantanderRemittance } from "@/utils/remittance";
+import { validateSantanderRemittance } from "@/utils/cnab240Validator";
 
 function formatCurrency(value: number) {
   return value.toLocaleString("pt-BR", {
@@ -13,10 +14,10 @@ function formatCurrency(value: number) {
 }
 
 function sanitizeDocument(value: string) {
-  return (value ?? "").replace(/\D/g, "");
+  return value.replace(/\D/g, "");
 }
 
-function getTodayISO() {
+function getTodayIso() {
   const now = new Date();
   const year = now.getFullYear();
   const month = String(now.getMonth() + 1).padStart(2, "0");
@@ -40,7 +41,7 @@ const bankOptions = [{ label: "Banco Santander", value: "033" }];
 export default function Page() {
   const [company, setCompany] = useState<CompanyInfo>(initialCompany);
   const [darfs, setDarfs] = useState<DarfRecord[]>([]);
-  const [paymentDate, setPaymentDate] = useState<string>("");
+  const [paymentDate, setPaymentDate] = useState("");
   const [isUploading, setIsUploading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [validationMessage, setValidationMessage] = useState<string | null>(null);
@@ -48,7 +49,7 @@ export default function Page() {
   const [diagErrors, setDiagErrors] = useState<string[]>([]);
 
   useEffect(() => {
-    setPaymentDate(getTodayISO());
+    setPaymentDate(getTodayIso());
   }, []);
 
   const summary = useMemo(() => {
@@ -101,15 +102,17 @@ export default function Page() {
       totalMulta,
       totalJuros,
       totalGeral,
-      porCodigo: Array.from(byCodigo.values()),
+      porCodigo: Array.from(byCodigo.values()).sort((a, b) =>
+        a.codigoReceita.localeCompare(b.codigoReceita),
+      ),
     };
   }, [darfs]);
 
-  function handleCompanyChange(field: keyof CompanyInfo, value: string) {
+  const handleCompanyChange = (field: keyof CompanyInfo, value: string) => {
     setCompany((current) => ({ ...current, [field]: value }));
-  }
+  };
 
-  async function handleFileUpload(event: ChangeEvent<HTMLInputElement>) {
+  const handleFileUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
@@ -131,16 +134,12 @@ export default function Page() {
       const payload = await response.json();
 
       if (!response.ok) {
-        throw new Error(
-          payload.detail || payload.message || "Falha ao processar o PDF.",
-        );
+        throw new Error(payload.message ?? "Falha ao processar o arquivo enviado.");
       }
 
       const sanitizedDarfs: DarfRecord[] = payload.darfs.map((d: DarfRecord) => ({
         ...d,
         cnpj: sanitizeDocument(d.cnpj),
-        codigoReceita: (d.codigoReceita ?? "").trim(),
-        numeroReferencia: sanitizeDocument(d.numeroReferencia),
       }));
 
       setDarfs(sanitizedDarfs);
@@ -156,9 +155,9 @@ export default function Page() {
       setIsUploading(false);
       event.target.value = "";
     }
-  }
+  };
 
-  function handleGenerateRemittance() {
+  const handleGenerateRemittance = () => {
     setValidationMessage(null);
     setDiagNotes([]);
     setDiagErrors([]);
@@ -171,18 +170,25 @@ export default function Page() {
     }
 
     if (!paymentDate) {
-      setValidationMessage(
-        "Informe a data de pagamento antes de gerar a remessa.",
-      );
+      setValidationMessage("Informe a data de pagamento antes de gerar a remessa.");
       return;
     }
 
     try {
       const remittance = generateSantanderRemittance(company, darfs, paymentDate);
+      const diag = validateSantanderRemittance(
+        remittance,
+        summary.totalGeral,
+        paymentDate,
+      );
+
+      setDiagNotes(diag.notes);
+      setDiagErrors(diag.errors);
 
       const blob = new Blob([remittance], {
         type: "text/plain;charset=utf-8",
       });
+
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       const timestamp = new Date()
@@ -197,25 +203,29 @@ export default function Page() {
       link.remove();
       URL.revokeObjectURL(url);
 
-      setValidationMessage("Arquivo de remessa gerado com sucesso!");
+      setValidationMessage(
+        diag.ok
+          ? "Arquivo de remessa gerado e validado com sucesso!"
+          : "Arquivo gerado com observações — verifique o mini-validador.",
+      );
     } catch (error) {
       const message =
         error instanceof Error
           ? error.message
-          : "Não foi possível gerar o arquivo remessa.";
+          : "Não foi possível gerar o arquivo de remessa.";
 
       setValidationMessage(message);
     }
-  }
+  };
 
-  function handleReset() {
+  const handleReset = () => {
     setDarfs([]);
     setErrorMessage(null);
     setValidationMessage(null);
     setDiagNotes([]);
     setDiagErrors([]);
-    setPaymentDate(getTodayISO());
-  }
+    setPaymentDate(getTodayIso());
+  };
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
@@ -226,21 +236,23 @@ export default function Page() {
               Conversor de DARF para Arquivo CNAB
             </h1>
             <p className="text-sm text-slate-500 sm:text-base">
-              Importe DARFs em PDF, confira o relatório consolidado e gere a remessa CNAB 240
-              do Santander com a data de pagamento informada no formulário.
+              Importe um PDF com suas guias de DARF sem código de barras, visualize
+              o relatório consolidado e gere o arquivo de remessa para o Banco Santander.
             </p>
           </div>
           <div className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white">
-            Segmento N · DARF sem código de barras
+            Versão 1.0 · Manual v11.6 · Santander
           </div>
         </div>
       </header>
 
       <main className="mx-auto flex max-w-7xl flex-col gap-6 px-6 py-8">
         <section className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-          <h2 className="text-lg font-semibold text-slate-900">Informações do arquivo CNAB</h2>
+          <h2 className="text-lg font-semibold text-slate-900">
+            Informações para o arquivo CNAB
+          </h2>
           <p className="mt-1 text-sm text-slate-500">
-            A data de vencimento vem do campo 06 do DARF. A data de pagamento é carregada automaticamente com a data de hoje.
+            Preencha os dados conforme o convênio estabelecido com o banco.
           </p>
 
           <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -260,21 +272,12 @@ export default function Page() {
             </label>
 
             <label className="flex flex-col gap-1 text-sm font-medium text-slate-600">
-              Data de pagamento
-              <input
-                type="date"
-                className="rounded-md border border-slate-300 px-3 py-2 focus:border-slate-500 focus:outline-none"
-                value={paymentDate}
-                onChange={(e) => setPaymentDate(e.target.value)}
-              />
-            </label>
-
-            <label className="flex flex-col gap-1 text-sm font-medium text-slate-600">
               Agência
               <input
                 className="rounded-md border border-slate-300 px-3 py-2 focus:border-slate-500 focus:outline-none"
                 value={company.agencia}
                 onChange={(e) => handleCompanyChange("agencia", e.target.value)}
+                placeholder="0000"
               />
             </label>
 
@@ -284,6 +287,7 @@ export default function Page() {
                 className="rounded-md border border-slate-300 px-3 py-2 focus:border-slate-500 focus:outline-none"
                 value={company.dvAgencia}
                 onChange={(e) => handleCompanyChange("dvAgencia", e.target.value)}
+                placeholder="0"
               />
             </label>
 
@@ -293,6 +297,7 @@ export default function Page() {
                 className="rounded-md border border-slate-300 px-3 py-2 focus:border-slate-500 focus:outline-none"
                 value={company.conta}
                 onChange={(e) => handleCompanyChange("conta", e.target.value)}
+                placeholder="000000"
               />
             </label>
 
@@ -302,6 +307,7 @@ export default function Page() {
                 className="rounded-md border border-slate-300 px-3 py-2 focus:border-slate-500 focus:outline-none"
                 value={company.dvConta}
                 onChange={(e) => handleCompanyChange("dvConta", e.target.value)}
+                placeholder="0"
               />
             </label>
 
@@ -311,6 +317,7 @@ export default function Page() {
                 className="rounded-md border border-slate-300 px-3 py-2 focus:border-slate-500 focus:outline-none"
                 value={company.convenio}
                 onChange={(e) => handleCompanyChange("convenio", e.target.value)}
+                placeholder="Informe o convênio"
               />
             </label>
 
@@ -320,6 +327,7 @@ export default function Page() {
                 className="rounded-md border border-slate-300 px-3 py-2 focus:border-slate-500 focus:outline-none"
                 value={company.empresa}
                 onChange={(e) => handleCompanyChange("empresa", e.target.value)}
+                placeholder="Nome da empresa"
               />
             </label>
 
@@ -329,6 +337,7 @@ export default function Page() {
                 className="rounded-md border border-slate-300 px-3 py-2 focus:border-slate-500 focus:outline-none"
                 value={company.cnpj}
                 onChange={(e) => handleCompanyChange("cnpj", e.target.value)}
+                placeholder="00.000.000/0000-00"
               />
             </label>
           </div>
@@ -337,9 +346,12 @@ export default function Page() {
         <section className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <h2 className="text-lg font-semibold text-slate-900">Importar PDF de DARF</h2>
+              <h2 className="text-lg font-semibold text-slate-900">
+                Importar PDF de DARF
+              </h2>
               <p className="text-sm text-slate-500">
-                Cada upload substitui os dados atuais.
+                O arquivo deve conter guias sem código de barras. Cada upload substitui
+                os dados atuais.
               </p>
             </div>
 
@@ -390,18 +402,37 @@ export default function Page() {
                     <th className="px-4 py-3 text-right">Total</th>
                   </tr>
                 </thead>
+
                 <tbody className="divide-y divide-slate-100 bg-white">
                   {darfs.map((darf) => (
                     <tr key={darf.id}>
-                      <td className="px-4 py-3 font-medium text-slate-700">{darf.nome}</td>
-                      <td className="px-4 py-3 text-slate-600">{darf.periodoApuracao}</td>
-                      <td className="px-4 py-3 text-slate-600">{darf.cnpj}</td>
-                      <td className="px-4 py-3 text-slate-600">{darf.codigoReceita}</td>
-                      <td className="px-4 py-3 text-slate-600">{darf.numeroReferencia}</td>
-                      <td className="px-4 py-3 text-slate-600">{darf.dataVencimento}</td>
-                      <td className="px-4 py-3 text-right">{formatCurrency(darf.valorPrincipal)}</td>
-                      <td className="px-4 py-3 text-right">{formatCurrency(darf.valorMulta)}</td>
-                      <td className="px-4 py-3 text-right">{formatCurrency(darf.valorJuros)}</td>
+                      <td className="px-4 py-3 font-medium text-slate-700">
+                        {darf.nome}
+                      </td>
+                      <td className="px-4 py-3 text-slate-600">
+                        {darf.periodoApuracao}
+                      </td>
+                      <td className="px-4 py-3 text-slate-600">
+                        {darf.cnpj}
+                      </td>
+                      <td className="px-4 py-3 text-slate-600">
+                        {darf.codigoReceita}
+                      </td>
+                      <td className="px-4 py-3 text-slate-600">
+                        {darf.numeroReferencia}
+                      </td>
+                      <td className="px-4 py-3 text-slate-600">
+                        {darf.dataVencimento}
+                      </td>
+                      <td className="px-4 py-3 text-right font-medium text-slate-700">
+                        {formatCurrency(darf.valorPrincipal)}
+                      </td>
+                      <td className="px-4 py-3 text-right text-slate-600">
+                        {formatCurrency(darf.valorMulta)}
+                      </td>
+                      <td className="px-4 py-3 text-right text-slate-600">
+                        {formatCurrency(darf.valorJuros)}
+                      </td>
                       <td className="px-4 py-3 text-right font-semibold text-slate-900">
                         {formatCurrency(darf.valorTotal)}
                       </td>
@@ -416,7 +447,13 @@ export default function Page() {
         {darfs.length > 0 && (
           <section className="grid gap-6 lg:grid-cols-[2fr,1fr]">
             <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-              <h3 className="text-lg font-semibold text-slate-900">Relatório consolidado</h3>
+              <h3 className="text-lg font-semibold text-slate-900">
+                Relatório consolidado
+              </h3>
+              <p className="mt-1 text-sm text-slate-500">
+                Totais por código de receita com detalhamento de principal, multa,
+                juros e valor total.
+              </p>
 
               <div className="mt-6 overflow-x-auto rounded-lg border border-slate-200">
                 <table className="min-w-[900px] divide-y divide-slate-200 text-sm">
@@ -430,6 +467,7 @@ export default function Page() {
                       <th className="px-4 py-3 text-right">Total</th>
                     </tr>
                   </thead>
+
                   <tbody className="divide-y divide-slate-100 bg-white">
                     {summary.porCodigo.map((item) => (
                       <tr key={item.codigoReceita}>
@@ -454,14 +492,23 @@ export default function Page() {
                       </tr>
                     ))}
                   </tbody>
+
                   <tfoot className="bg-slate-50 font-semibold text-slate-900">
                     <tr>
                       <td className="px-4 py-3">Total geral</td>
                       <td className="px-4 py-3 text-right">{summary.totalGuias}</td>
-                      <td className="px-4 py-3 text-right">{formatCurrency(summary.totalPrincipal)}</td>
-                      <td className="px-4 py-3 text-right">{formatCurrency(summary.totalMulta)}</td>
-                      <td className="px-4 py-3 text-right">{formatCurrency(summary.totalJuros)}</td>
-                      <td className="px-4 py-3 text-right">{formatCurrency(summary.totalGeral)}</td>
+                      <td className="px-4 py-3 text-right">
+                        {formatCurrency(summary.totalPrincipal)}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        {formatCurrency(summary.totalMulta)}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        {formatCurrency(summary.totalJuros)}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        {formatCurrency(summary.totalGeral)}
+                      </td>
                     </tr>
                   </tfoot>
                 </table>
@@ -470,30 +517,39 @@ export default function Page() {
 
             <div className="flex flex-col gap-4">
               <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-                <h3 className="text-lg font-semibold text-slate-900">Resumo rápido</h3>
+                <h3 className="text-lg font-semibold text-slate-900">
+                  Resumo rápido
+                </h3>
+
                 <dl className="mt-4 space-y-3 text-sm text-slate-600">
                   <div className="flex items-center justify-between">
                     <dt>Quantidade de guias</dt>
-                    <dd className="font-semibold text-slate-900">{summary.totalGuias}</dd>
+                    <dd className="font-semibold text-slate-900">
+                      {summary.totalGuias}
+                    </dd>
                   </div>
+
                   <div className="flex items-center justify-between">
                     <dt>Total do principal</dt>
                     <dd className="font-semibold text-slate-900">
                       {formatCurrency(summary.totalPrincipal)}
                     </dd>
                   </div>
+
                   <div className="flex items-center justify-between">
                     <dt>Total de multa</dt>
                     <dd className="font-semibold text-slate-900">
                       {formatCurrency(summary.totalMulta)}
                     </dd>
                   </div>
+
                   <div className="flex items-center justify-between">
                     <dt>Total de juros</dt>
                     <dd className="font-semibold text-slate-900">
                       {formatCurrency(summary.totalJuros)}
                     </dd>
                   </div>
+
                   <div className="flex items-center justify-between border-t border-slate-200 pt-3">
                     <dt>Valor total</dt>
                     <dd className="text-lg font-bold text-slate-900">
@@ -504,10 +560,25 @@ export default function Page() {
               </div>
 
               <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-                <h3 className="text-lg font-semibold text-slate-900">Gerar arquivo remessa</h3>
+                <h3 className="text-lg font-semibold text-slate-900">
+                  Gerar arquivo remessa
+                </h3>
                 <p className="mt-1 text-sm text-slate-500">
-                  O vencimento vai do PDF. A data de pagamento carrega automaticamente com a data de hoje.
+                  A data de pagamento vem do formulário abaixo e inicia com a data
+                  de hoje.
                 </p>
+
+                <div className="mt-4">
+                  <label className="flex flex-col gap-1 text-sm font-medium text-slate-600">
+                    Data de pagamento
+                    <input
+                      type="date"
+                      className="rounded-md border border-slate-300 px-3 py-2 focus:border-slate-500 focus:outline-none"
+                      value={paymentDate}
+                      onChange={(e) => setPaymentDate(e.target.value)}
+                    />
+                  </label>
+                </div>
 
                 <button
                   type="button"
@@ -532,11 +603,15 @@ export default function Page() {
 
               {(diagNotes.length > 0 || diagErrors.length > 0) && (
                 <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm">
-                  <h3 className="text-lg font-semibold text-slate-900">Mini-validador CNAB 240</h3>
+                  <h3 className="text-lg font-semibold text-slate-900">
+                    Mini-validador CNAB 240 (Santander)
+                  </h3>
 
                   {diagErrors.length > 0 ? (
                     <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-                      <p className="font-semibold">Atenção — foram encontrados problemas</p>
+                      <p className="font-semibold">
+                        Atenção — foram encontrados problemas
+                      </p>
                       <ul className="mt-2 list-inside list-disc space-y-1">
                         {diagErrors.map((error, index) => (
                           <li key={index}>{error}</li>

@@ -1,329 +1,341 @@
 // src/utils/cnab240Validator.ts
 
-export interface Cnab240ValidationOptions {
-  expectedBankCode?: string;
-  expectedServiceType?: string;
-  expectedLaunchType?: string;
-  expectedPaymentDate?: string;
-  uiTotal?: number;
-}
-
-export interface Cnab240ValidationResult {
+export interface ValidateResult {
   ok: boolean;
   notes: string[];
   errors: string[];
+  debug?: Record<string, unknown>;
 }
 
-function digitsOnly(value: string | null | undefined) {
+function sliceCols(line: string, from1: number, to1: number): string {
+  const from = Math.max(1, from1) - 1;
+  const to = Math.min(240, to1);
+  return (line ?? "").slice(from, to);
+}
+
+function digitsOnly(value: string | null | undefined): string {
   return (value ?? "").replace(/\D/g, "");
 }
 
-function safeSlice(line: string, start1: number, end1: number) {
-  return line.slice(start1 - 1, end1);
+function parseIntSafe(value: string): number {
+  const n = parseInt((value ?? "").trim(), 10);
+  return Number.isFinite(n) ? n : 0;
 }
 
-function normalizeDateToDDMMAAAA(value: string | null | undefined) {
+function parseMoneyField(value: string): number {
+  const digits = digitsOnly(value);
+  return parseIntSafe(digits) / 100;
+}
+
+function isValidDateDDMMAAAA(value: string): boolean {
+  const digits = digitsOnly(value);
+  if (digits.length !== 8) return false;
+
+  const dd = Number(digits.slice(0, 2));
+  const mm = Number(digits.slice(2, 4));
+  const yyyy = Number(digits.slice(4, 8));
+
+  if (yyyy < 1900 || yyyy > 2999) return false;
+  if (mm < 1 || mm > 12) return false;
+  if (dd < 1 || dd > 31) return false;
+
+  const date = new Date(yyyy, mm - 1, dd);
+  return (
+    date.getFullYear() === yyyy &&
+    date.getMonth() === mm - 1 &&
+    date.getDate() === dd
+  );
+}
+
+function normalizeDateToDDMMAAAA(value: string | null | undefined): string {
   const raw = String(value ?? "").trim();
+
   if (!raw) return "";
+
   if (/^\d{2}\/\d{2}\/\d{4}$/.test(raw)) {
-    const [dd, mm, yyyy] = raw.split("/");
-    return `${dd}${mm}${yyyy}`;
+    return digitsOnly(raw);
   }
+
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
     const [yyyy, mm, dd] = raw.split("-");
     return `${dd}${mm}${yyyy}`;
   }
-  const digits = digitsOnly(raw);
-  if (digits.length === 8) {
-    if (Number(digits.slice(0, 4)) > 1900) {
-      return `${digits.slice(6, 8)}${digits.slice(4, 6)}${digits.slice(0, 4)}`;
-    }
-    return digits;
-  }
-  return "";
+
+  return digitsOnly(raw);
 }
 
-function almostEqual(a: number, b: number, epsilon = 0.05) {
-  return Math.abs(a - b) <= epsilon;
+function isPastDateDDMMAAAA(value: string): boolean {
+  if (!isValidDateDDMMAAAA(value)) return true;
+
+  const dd = Number(value.slice(0, 2));
+  const mm = Number(value.slice(2, 4));
+  const yyyy = Number(value.slice(4, 8));
+
+  const target = new Date(yyyy, mm - 1, dd);
+  target.setHours(0, 0, 0, 0);
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  return target.getTime() < today.getTime();
 }
 
-function toMoney18(raw: string): number {
-  // Formato 9(016)V2 = 18 dígitos totais, 2 casas decimais implícitas
-  const digits = digitsOnly(raw);
-  const cents = Number.parseInt(digits || "0", 10);
-  return Number.isFinite(cents) ? cents / 100 : 0;
+function lineType(line: string): string {
+  return sliceCols(line, 8, 8);
 }
 
-function toMoney15(raw: string): number {
-  // Formato 9(013)V2 = 15 dígitos totais, 2 casas decimais implícitas
-  const digits = digitsOnly(raw);
-  const cents = Number.parseInt(digits || "0", 10);
-  return Number.isFinite(cents) ? cents / 100 : 0;
+function isHeaderArquivo(line: string): boolean {
+  return lineType(line) === "0";
+}
+
+function isHeaderLote(line: string): boolean {
+  return lineType(line) === "1";
+}
+
+function isTrailerLote(line: string): boolean {
+  return lineType(line) === "5";
+}
+
+function isTrailerArquivo(line: string): boolean {
+  return lineType(line) === "9";
+}
+
+function isDetail(line: string): boolean {
+  return lineType(line) === "3";
+}
+
+function segmentCode(line: string): string {
+  return sliceCols(line, 14, 14);
+}
+
+function almostEqual(a: number, b: number, tolerance = 0.01): boolean {
+  return Math.abs(a - b) <= tolerance;
 }
 
 export function validateSantanderRemittance(
-  content: string,
-  options: Cnab240ValidationOptions = {},
-): Cnab240ValidationResult {
-  // Defaults para DARF Normal sem código de barras (Segmento N)
-  const expectedBankCode = (options.expectedBankCode || "033").trim() || "033";
-  const expectedServiceType = (options.expectedServiceType || "22").trim() || "22";
-  const expectedLaunchType = (options.expectedLaunchType || "16").trim() || "16";
-  const expectedPaymentDate = normalizeDateToDDMMAAAA(options.expectedPaymentDate);
-
+  text: string,
+  uiTotal?: number,
+  paymentDate?: string
+): ValidateResult {
   const notes: string[] = [];
   const errors: string[] = [];
 
-  const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const lines = normalized
-    .split("\n")
-    .map((line) => line.replace(/\uFEFF/g, ""))
-    .filter((line) => line.length > 0);
+  const raw = (text ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const lines = raw.split("\n").filter((line) => line.length > 0);
 
-  if (!lines.length) {
-    return { ok: false, notes, errors: ["Arquivo remessa vazio."] };
+  if (lines.length === 0) {
+    return { ok: false, notes, errors: ["Arquivo vazio."] };
   }
 
-  for (let i = 0; i < lines.length; i += 1) {
-    if (lines[i].length !== 240) {
-      errors.push(`Linha ${i + 1} com ${lines[i].length} colunas (esperado 240).`);
-    }
-  }
+  let allLenOk = true;
+  let allBankOk = true;
 
-  const headerArquivo = lines[0] ?? "";
-  const headerLote    = lines[1] ?? "";
-  const trailerArquivo = lines[lines.length - 1] ?? "";
-  const trailerLote    = lines[lines.length - 2] ?? "";
-  const detalheLines   = lines.slice(2, -2);
+  lines.forEach((line, index) => {
+    const n = index + 1;
 
-  // ── HEADER ARQUIVO (Tipo 0) ─────────────────────────────────────────────────
-  if (safeSlice(headerArquivo, 1, 3) !== expectedBankCode)
-    errors.push(`Código do banco inválido no header do arquivo: "${safeSlice(headerArquivo, 1, 3)}" (esperado "${expectedBankCode}").`);
-
-  if (safeSlice(headerArquivo, 4, 7) !== "0000")
-    errors.push(`Lote inválido no header do arquivo: "${safeSlice(headerArquivo, 4, 7)}" (esperado "0000").`);
-
-  if (safeSlice(headerArquivo, 8, 8) !== "0")
-    errors.push(`Tipo de registro inválido no header do arquivo: "${safeSlice(headerArquivo, 8, 8)}" (esperado "0").`);
-
-  const headerConvenio20 = safeSlice(headerArquivo, 33, 52);
-  if (!/^\d{20}$/.test(headerConvenio20))
-    errors.push(`Convênio inválido no header do arquivo: "${headerConvenio20}".`);
-  else
-    notes.push(`Header Arquivo convênio OK: ${headerConvenio20}`);
-
-  // ── HEADER LOTE (Tipo 1) ────────────────────────────────────────────────────
-  if (safeSlice(headerLote, 1, 3) !== expectedBankCode)
-    errors.push(`Código do banco inválido no header do lote: "${safeSlice(headerLote, 1, 3)}" (esperado "${expectedBankCode}").`);
-
-  if (safeSlice(headerLote, 8, 8) !== "1")
-    errors.push(`Tipo de registro inválido no header do lote: "${safeSlice(headerLote, 8, 8)}" (esperado "1").`);
-
-  if (safeSlice(headerLote, 9, 9) !== "C")
-    errors.push(`Operação inválida no header do lote: "${safeSlice(headerLote, 9, 9)}" (esperado "C").`);
-
-  const serviceType = safeSlice(headerLote, 10, 11);
-  if (serviceType !== expectedServiceType)
-    errors.push(`Tipo de serviço inválido no header do lote: "${serviceType}" (esperado "${expectedServiceType}").`);
-  else
-    notes.push(`Header Lote serviço OK: ${serviceType}`);
-
-  const launchType = safeSlice(headerLote, 12, 13);
-  if (launchType !== expectedLaunchType)
-    errors.push(`Forma de lançamento inválida no header do lote: "${launchType}" (esperado "${expectedLaunchType}").`);
-  else
-    notes.push(`Header Lote forma lançamento OK: ${launchType}`);
-
-  const versionType = safeSlice(headerLote, 14, 16);
-  if (versionType !== "010")
-    notes.push(`Versão do layout no header do lote: "${versionType}" (esperado "010" para DARF/Segmento N).`);
-
-  const loteConvenio20 = safeSlice(headerLote, 33, 52);
-  if (!/^\d{20}$/.test(loteConvenio20))
-    errors.push(`Convênio inválido no header do lote: "${loteConvenio20}".`);
-  else
-    notes.push(`Header Lote convênio OK: ${loteConvenio20}`);
-
-  // ── DETALHES – Segmento N: DARF Normal sem código de barras ────────────────
-  //
-  // Layout conforme manual YLEC_2403 V.11.6, seção 3.5 + N2:
-  //   P1-3    Código do Banco
-  //   P8      Tipo de Registro = "3"
-  //   P9-13   Seq. Registro no Lote
-  //   P14     Código Segmento = "N"
-  //   P15     Tipo de Movimento
-  //   P16-17  Código da Instrução para Movimento
-  //   P18-37  Número do Documento Cliente (Seu Número)
-  //   P38-57  Número do Documento Banco
-  //   P58-87  Nome do Contribuinte (obrigatório)
-  //   P88-95  Data do Pagamento (DDMMAAAA)
-  //   P96-110 Valor Total do Pagamento  [9(013)V2 = 15 posições]
-  //   -- Complementares N2 (DARF Normal) --
-  //   P111-116  Código da Receita do Tributo
-  //   P117-118  Tipo de Identificação do Contribuinte
-  //   P119-132  Identificação do Contribuinte (14 dígitos)
-  //   P133-134  Código de Identificação do Tributo = "16"
-  //   P135-142  Período de Apuração (DDMMAAAA)
-  //   P143-159  Número de Referência (17 dígitos)
-  //   P160-174  Valor Principal     [9(013)V2 = 15 posições]
-  //   P175-189  Valor da Multa      [9(013)V2 = 15 posições]
-  //   P190-204  Valor dos Juros     [9(013)V2 = 15 posições]
-  //   P205-212  Data de Vencimento  (DDMMAAAA)
-  //   P213-230  Filler (brancos)
-  //   P231-240  Ocorrências para o Retorno
-
-  let totalGeral = 0;
-
-  if (!detalheLines.length) {
-    errors.push("Nenhum detalhe encontrado no lote.");
-  }
-
-  detalheLines.forEach((line, index) => {
-    const lineNumber = index + 3;
-
-    if (safeSlice(line, 1, 3) !== expectedBankCode)
-      errors.push(`Linha ${lineNumber}: código do banco inválido "${safeSlice(line, 1, 3)}".`);
-
-    if (safeSlice(line, 8, 8) !== "3")
-      errors.push(`Linha ${lineNumber}: tipo de registro inválido "${safeSlice(line, 8, 8)}" (esperado "3").`);
-
-    const segment = safeSlice(line, 14, 14);
-    if (segment !== "N")
-      errors.push(`Linha ${lineNumber}: segmento inválido "${segment}" (esperado "N" para DARF Normal).`);
-
-    // Nome do contribuinte
-    const nomeContribuinte = safeSlice(line, 58, 87).trim();
-    if (!nomeContribuinte)
-      errors.push(`Linha ${lineNumber}: nome do contribuinte não informado.`);
-
-    // Data do pagamento
-    const dataPagamento = safeSlice(line, 88, 95);
-    if (!/^\d{8}$/.test(dataPagamento) || dataPagamento === "00000000") {
-      errors.push(`Linha ${lineNumber}: data de pagamento inválida "${dataPagamento}".`);
-    } else if (expectedPaymentDate && dataPagamento !== expectedPaymentDate) {
-      errors.push(
-        `Linha ${lineNumber}: data de pagamento "${dataPagamento}" diverge do esperado "${expectedPaymentDate}".`,
-      );
+    if (line.length !== 240) {
+      allLenOk = false;
+      errors.push(`Linha ${n} com tamanho inválido: ${line.length} (esperado 240).`);
     }
 
-    // Valor Total (P96-110 = 15 posições, 9(013)V2)
-    const valorTotal = toMoney15(safeSlice(line, 96, 110));
-    if (valorTotal <= 0)
-      errors.push(`Linha ${lineNumber}: valor total inválido ou zero.`);
-
-    // Código da Receita (P111-116)
-    const codigoReceita = safeSlice(line, 111, 116).trim();
-    if (!/^\d{1,6}$/.test(codigoReceita) || Number(codigoReceita) === 0)
-      errors.push(`Linha ${lineNumber}: código da receita inválido "${codigoReceita}".`);
-
-    // Tipo de Identificação do Contribuinte (P117-118)
-    const tipoIdentificacao = safeSlice(line, 117, 118);
-    if (!["01", "02", "03", "04", "06", "07", "08", "09"].includes(tipoIdentificacao))
-      errors.push(`Linha ${lineNumber}: tipo de identificação do contribuinte inválido "${tipoIdentificacao}".`);
-
-    // Identificação do Contribuinte (P119-132, 14 dígitos)
-    const identificacao = safeSlice(line, 119, 132);
-    if (!/^\d{14}$/.test(identificacao))
-      errors.push(`Linha ${lineNumber}: identificação do contribuinte inválida "${identificacao}".`);
-
-    // Código de Identificação do Tributo (P133-134) = "16" para DARF Normal
-    const codigoTributo = safeSlice(line, 133, 134);
-    if (codigoTributo !== "16")
-      errors.push(`Linha ${lineNumber}: código do tributo "${codigoTributo}" (esperado "16" para DARF Normal).`);
-
-    // Período de Apuração (P135-142)
-    const periodoApuracao = safeSlice(line, 135, 142);
-    if (!/^\d{8}$/.test(periodoApuracao) || periodoApuracao === "00000000")
-      errors.push(`Linha ${lineNumber}: período de apuração inválido "${periodoApuracao}".`);
-
-    // Número de Referência (P143-159, 17 dígitos)
-    const numeroReferencia = safeSlice(line, 143, 159);
-    const refDigits = digitsOnly(numeroReferencia);
-    if (refDigits.length !== 17 || Number(refDigits) === 0)
-      errors.push(`Linha ${lineNumber}: número de referência inválido "${numeroReferencia}".`);
-
-    // Valor Principal (P160-174)
-    const valorPrincipal = toMoney15(safeSlice(line, 160, 174));
-    if (valorPrincipal <= 0)
-      errors.push(`Linha ${lineNumber}: valor principal inválido ou zero.`);
-
-    // Valor Multa (P175-189) e Juros (P190-204) – opcionais, só validamos que são numéricos
-    const valorMulta = toMoney15(safeSlice(line, 175, 189));
-    const valorJuros = toMoney15(safeSlice(line, 190, 204));
-
-    // Data de Vencimento (P205-212)
-    const dataVencimento = safeSlice(line, 205, 212);
-    if (!/^\d{8}$/.test(dataVencimento) || dataVencimento === "00000000")
-      errors.push(`Linha ${lineNumber}: data de vencimento inválida "${dataVencimento}".`);
-
-    // Consistência: principal + multa + juros ≈ total
-    const soma = Number((valorPrincipal + valorMulta + valorJuros).toFixed(2));
-    if (!almostEqual(soma, valorTotal)) {
-      errors.push(
-        `Linha ${lineNumber}: total divergente. ` +
-          `Principal (${valorPrincipal.toFixed(2)}) + multa (${valorMulta.toFixed(2)}) + ` +
-          `juros (${valorJuros.toFixed(2)}) = ${soma.toFixed(2)}, mas total = ${valorTotal.toFixed(2)}.`,
-      );
+    if (sliceCols(line, 1, 3) !== "033") {
+      allBankOk = false;
+      errors.push(`Linha ${n} com código do banco inválido: "${sliceCols(line, 1, 3)}".`);
     }
-
-    totalGeral += valorTotal;
   });
 
-  // ── TRAILER LOTE (Tipo 5) ───────────────────────────────────────────────────
-  if (safeSlice(trailerLote, 8, 8) !== "5")
-    errors.push(`Tipo de registro inválido no trailer do lote: "${safeSlice(trailerLote, 8, 8)}" (esperado "5").`);
+  if (allLenOk) notes.push("Todas as linhas têm 240 colunas.");
+  if (allBankOk) notes.push('Código do banco "033" confirmado em todas as linhas.');
 
-  const qtdRegistrosLote = Number.parseInt(safeSlice(trailerLote, 18, 23), 10);
-  const expectedQtdRegistrosLote = detalheLines.length + 2; // +header lote +trailer lote
-  if (qtdRegistrosLote !== expectedQtdRegistrosLote)
-    errors.push(`Quantidade de registros no trailer do lote inválida: ${qtdRegistrosLote} (esperado ${expectedQtdRegistrosLote}).`);
+  const H = lines.find(isHeaderArquivo);
+  const HL = lines.find(isHeaderLote);
+  const TL = lines.find(isTrailerLote);
+  const TA = lines.find(isTrailerArquivo);
+  const detalhes = lines.filter(isDetail);
+  const detalhesN = detalhes.filter((line) => segmentCode(line) === "N");
 
-  // Somatória dos valores (P24-41 = 9(016)V2 = 18 posições)
-  const trailerSomatoriaValue = toMoney18(safeSlice(trailerLote, 24, 41));
-  if (!almostEqual(trailerSomatoriaValue, totalGeral)) {
-    errors.push(
-      `Somatória de valores no trailer do lote divergente: ${trailerSomatoriaValue.toFixed(2)} (esperado ${totalGeral.toFixed(2)}).`,
-    );
-  } else {
-    notes.push(`Trailer Lote somatória OK: ${trailerSomatoriaValue.toFixed(2)}`);
+  if (!H) errors.push("Header do Arquivo (tipo 0) não encontrado.");
+  if (!HL) errors.push("Header de Lote (tipo 1) não encontrado.");
+  if (!TL) errors.push("Trailer de Lote (tipo 5) não encontrado.");
+  if (!TA) errors.push("Trailer do Arquivo (tipo 9) não encontrado.");
+
+  if (!H || !HL || !TL || !TA) {
+    return { ok: false, notes, errors };
   }
 
-  // ── TRAILER ARQUIVO (Tipo 9) ────────────────────────────────────────────────
-  if (safeSlice(trailerArquivo, 4, 7) !== "9999")
-    errors.push(`Lote inválido no trailer do arquivo: "${safeSlice(trailerArquivo, 4, 7)}" (esperado "9999").`);
-
-  if (safeSlice(trailerArquivo, 8, 8) !== "9")
-    errors.push(`Tipo de registro inválido no trailer do arquivo: "${safeSlice(trailerArquivo, 8, 8)}" (esperado "9").`);
-
-  const qtdLotesArquivo = Number.parseInt(safeSlice(trailerArquivo, 18, 23), 10);
-  if (qtdLotesArquivo !== 1)
-    errors.push(`Quantidade de lotes no trailer do arquivo inválida: ${qtdLotesArquivo} (esperado 1).`);
-
-  const qtdRegistrosArquivo = Number.parseInt(safeSlice(trailerArquivo, 24, 29), 10);
-  const expectedQtdRegistrosArquivo = lines.length;
-  if (qtdRegistrosArquivo !== expectedQtdRegistrosArquivo) {
-    errors.push(
-      `Quantidade de registros no trailer do arquivo inválida: ${qtdRegistrosArquivo} (esperado ${expectedQtdRegistrosArquivo}).`,
-    );
-  } else {
-    notes.push(`Todas as linhas têm 240 colunas.`);
-    notes.push(`Código do banco ${expectedBankCode} confirmado em todas as linhas principais.`);
-    notes.push(`Quantidade de registros do arquivo OK: ${qtdRegistrosArquivo}.`);
+  if (sliceCols(H, 4, 7) !== "0000") {
+    errors.push(`Header arquivo: lote inválido "${sliceCols(H, 4, 7)}".`);
+  }
+  if (sliceCols(H, 143, 143) !== "1") {
+    errors.push(`Header arquivo: código remessa/retorno inválido "${sliceCols(H, 143, 143)}".`);
+  }
+  if (sliceCols(H, 164, 166) !== "060") {
+    errors.push(`Header arquivo: versão inválida "${sliceCols(H, 164, 166)}" (esperado "060").`);
   }
 
-  if (typeof options.uiTotal === "number") {
-    if (!almostEqual(options.uiTotal, totalGeral)) {
-      errors.push(
-        `Total do arquivo (${totalGeral.toFixed(2)}) diferente do total exibido na UI (${options.uiTotal.toFixed(2)}).`,
-      );
-    } else {
-      notes.push(`Total do arquivo igual ao total da UI: ${totalGeral.toFixed(2)}.`);
+  const convH = sliceCols(H, 33, 52);
+  const convHL = sliceCols(HL, 33, 52);
+
+  if (convH !== convHL) {
+    errors.push(`Convênio divergente entre header arquivo e header lote: "${convH}" x "${convHL}".`);
+  } else {
+    notes.push(`Convênio OK: ${convH}`);
+  }
+
+  if (sliceCols(HL, 9, 9) !== "C") {
+    errors.push(`Header lote: tipo de operação inválido "${sliceCols(HL, 9, 9)}".`);
+  }
+  if (sliceCols(HL, 10, 11) !== "22") {
+    errors.push(`Header lote: tipo de serviço inválido "${sliceCols(HL, 10, 11)}" (esperado "22").`);
+  }
+  if (sliceCols(HL, 12, 13) !== "16") {
+    errors.push(`Header lote: forma de lançamento inválida "${sliceCols(HL, 12, 13)}" (esperado "16").`);
+  }
+  if (sliceCols(HL, 14, 16) !== "010") {
+    errors.push(`Header lote: versão do lote inválida "${sliceCols(HL, 14, 16)}" (esperado "010").`);
+  }
+
+  if (detalhesN.length === 0) {
+    errors.push("Nenhum detalhe Segmento N encontrado.");
+  } else {
+    notes.push(`Quantidade de detalhes Segmento N: ${detalhesN.length}.`);
+  }
+
+  const expectedPaymentDate = normalizeDateToDDMMAAAA(paymentDate);
+  let totalDetalhes = 0;
+
+  detalhesN.forEach((line, index) => {
+    const lineNumber = lines.indexOf(line) + 1;
+    const expectedSeq = index + 1;
+
+    if (parseIntSafe(sliceCols(line, 9, 13)) !== expectedSeq) {
+      errors.push(`Linha ${lineNumber}: número sequencial inválido "${sliceCols(line, 9, 13)}".`);
     }
+
+    if (sliceCols(line, 15, 15) !== "0") {
+      errors.push(`Linha ${lineNumber}: tipo de movimento inválido "${sliceCols(line, 15, 15)}".`);
+    }
+
+    if (sliceCols(line, 16, 17) !== "00") {
+      errors.push(`Linha ${lineNumber}: instrução de movimento inválida "${sliceCols(line, 16, 17)}".`);
+    }
+
+    const nome = sliceCols(line, 58, 87).trim();
+    if (!nome) {
+      errors.push(`Linha ${lineNumber}: nome do contribuinte vazio.`);
+    }
+
+    const dataPagamento = sliceCols(line, 88, 95);
+    if (!isValidDateDDMMAAAA(dataPagamento)) {
+      errors.push(`Linha ${lineNumber}: data de pagamento inválida "${dataPagamento}".`);
+    } else if (isPastDateDDMMAAAA(dataPagamento)) {
+      errors.push(`Linha ${lineNumber}: data de pagamento inferior à data atual "${dataPagamento}".`);
+    }
+
+    if (expectedPaymentDate && dataPagamento !== expectedPaymentDate) {
+      errors.push(
+        `Linha ${lineNumber}: data de pagamento divergente do formulário. Arquivo=${dataPagamento} Formulário=${expectedPaymentDate}.`
+      );
+    }
+
+    const valorTotal = parseMoneyField(sliceCols(line, 96, 110));
+    const codigoReceita = sliceCols(line, 111, 116);
+    const tipoIdent = sliceCols(line, 117, 118);
+    const contribuinte = sliceCols(line, 119, 132);
+    const tributo = sliceCols(line, 133, 134);
+    const periodo = sliceCols(line, 135, 142);
+    const referencia = sliceCols(line, 143, 159);
+    const principal = parseMoneyField(sliceCols(line, 160, 174));
+    const multa = parseMoneyField(sliceCols(line, 175, 189));
+    const juros = parseMoneyField(sliceCols(line, 190, 204));
+    const vencimento = sliceCols(line, 205, 212);
+
+    if (!/^\d{6}$/.test(codigoReceita)) {
+      errors.push(`Linha ${lineNumber}: código da receita inválido "${codigoReceita}".`);
+    }
+
+    if (!["01", "02"].includes(tipoIdent)) {
+      errors.push(`Linha ${lineNumber}: tipo de identificação inválido "${tipoIdent}".`);
+    }
+
+    if (!/^\d{14}$/.test(contribuinte)) {
+      errors.push(`Linha ${lineNumber}: identificação do contribuinte inválida "${contribuinte}".`);
+    }
+
+    if (tributo !== "16") {
+      errors.push(`Linha ${lineNumber}: código de identificação do tributo inválido "${tributo}".`);
+    }
+
+    if (!isValidDateDDMMAAAA(periodo)) {
+      errors.push(`Linha ${lineNumber}: período de apuração inválido "${periodo}".`);
+    }
+
+    if (!/^\d{17}$/.test(referencia)) {
+      errors.push(`Linha ${lineNumber}: número de referência inválido "${referencia}".`);
+    }
+
+    if (!isValidDateDDMMAAAA(vencimento)) {
+      errors.push(`Linha ${lineNumber}: data de vencimento inválida "${vencimento}".`);
+    }
+
+    const somaLinha = Number((principal + multa + juros).toFixed(2));
+    if (!almostEqual(somaLinha, valorTotal)) {
+      errors.push(
+        `Linha ${lineNumber}: total divergente. Principal=${principal.toFixed(
+          2
+        )}, Multa=${multa.toFixed(2)}, Juros=${juros.toFixed(2)}, Total=${valorTotal.toFixed(2)}.`
+      );
+    }
+
+    totalDetalhes += valorTotal;
+  });
+
+  const qtdRegLote = parseIntSafe(sliceCols(TL, 18, 23));
+  const qtdEsperadaLote = 1 + detalhes.length + 1;
+  if (qtdRegLote !== qtdEsperadaLote) {
+    errors.push(`Trailer lote: quantidade de registros divergente ${qtdRegLote} (esperado ${qtdEsperadaLote}).`);
+  }
+
+  const totalTrailerLote = parseMoneyField(sliceCols(TL, 24, 41));
+  if (!almostEqual(totalTrailerLote, totalDetalhes)) {
+    errors.push(
+      `Trailer lote: somatória divergente ${totalTrailerLote.toFixed(2)} (esperado ${totalDetalhes.toFixed(2)}).`
+    );
+  } else {
+    notes.push(`Somatória do lote OK: ${totalTrailerLote.toFixed(2)}.`);
+  }
+
+  const qtdLotesArquivo = parseIntSafe(sliceCols(TA, 18, 23));
+  if (qtdLotesArquivo !== 1) {
+    errors.push(`Trailer arquivo: quantidade de lotes divergente ${qtdLotesArquivo} (esperado 1).`);
+  }
+
+  const qtdRegsArquivo = parseIntSafe(sliceCols(TA, 24, 29));
+  if (qtdRegsArquivo !== lines.length) {
+    errors.push(`Trailer arquivo: quantidade de registros divergente ${qtdRegsArquivo} (esperado ${lines.length}).`);
+  }
+
+  if (typeof uiTotal === "number" && !almostEqual(uiTotal, totalDetalhes)) {
+    errors.push(
+      `Total do arquivo (${totalDetalhes.toFixed(2)}) difere do total da UI (${uiTotal.toFixed(2)}).`
+    );
   }
 
   return {
     ok: errors.length === 0,
     notes,
     errors,
+    debug: {
+      linhas: lines.length,
+      detalhesTotal: detalhes.length,
+      detalhesN: detalhesN.length,
+      convH,
+      convHL,
+      totalDetalhes: Number(totalDetalhes.toFixed(2)),
+      totalTrailerLote: Number(totalTrailerLote.toFixed(2)),
+      qtdRegLote,
+      qtdEsperadaLote,
+      qtdRegsArquivo,
+    },
   };
 }

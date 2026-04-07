@@ -362,7 +362,7 @@ export function generateSantanderRemittance(
   if (!Array.isArray(darfs) || darfs.length === 0) {
     throw new Error("Nenhum DARF informado para geração da remessa.");
   }
-
+  
   const paymentDateNorm = normalizeDateToDDMMAAAA(paymentDate);
   if (!paymentDateNorm) {
     throw new Error("Data de pagamento não informada no formulário.");
