@@ -2,295 +2,401 @@ import type { CompanyInfo, DarfRecord } from "@/types/darf";
 
 const COLS = 240;
 
-function blank() {
-  return Array(COLS).fill(" ");
-}
+const COD_BANCO = "033";
+const LOTE = "0001";
+const COD_REMESSA = "1";
+const VERSAO_ARQUIVO = "060";
+
+const TIPO_SERVICO = "22"; // Pagamento de Contas, Tributos e Impostos
+const FORMA_LANCAMENTO = "16"; // DARF Normal – sem código de barras
+const VERSAO_LOTE = "010";
+
+const TIPO_MOVIMENTO = "0"; // inclusão
+const INSTRUCAO_MOVIMENTO = "00"; // inclusão liberada
+const CODIGO_IDENTIFICACAO_TRIBUTO = "16"; // DARF Normal
+
+const blank = () => Array(COLS).fill(" ");
 
 function put(buf: string[], from1: number, to1: number, val: string) {
   const from = Math.max(1, from1);
   const to = Math.min(COLS, to1);
-  const s = (val ?? "").toString();
+  const s = String(val ?? "");
 
   for (let i = from - 1, j = 0; i < to && j < s.length; i += 1, j += 1) {
     buf[i] = s[j];
   }
 }
 
-function lpad(v: string | number, w: number, ch = "0") {
-  const s = String(v ?? "");
-  return s.length >= w ? s.slice(-w) : ch.repeat(w - s.length) + s;
+function onlyDigits(value: unknown): string {
+  return String(value ?? "").replace(/\D/g, "");
 }
 
-function rpad(v: string | number, w: number, ch = " ") {
-  const s = String(v ?? "");
-  return s.length >= w ? s.slice(0, w) : s + ch.repeat(w - s.length);
+function lpad(value: string | number, width: number, ch = "0"): string {
+  const s = String(value ?? "");
+  return s.length >= width ? s.slice(-width) : ch.repeat(width - s.length) + s;
 }
 
-function onlyDigits(value: string) {
-  return (value ?? "").replace(/\D/g, "");
+function rpad(value: string | number, width: number, ch = " "): string {
+  const s = String(value ?? "");
+  return s.length >= width ? s.slice(0, width) : s + ch.repeat(width - s.length);
 }
 
-function removeDiacritics(value: string) {
-  return (value ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+function asciiSafe(value: unknown): string {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9 /&().,\-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function asciiSafe(value: string) {
-  return removeDiacritics(value).toUpperCase().replace(/[^A-Z0-9 ]/g, " ");
+function parseNumber(value: unknown): number {
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+
+  const raw = String(value ?? "").trim();
+  if (!raw) return 0;
+
+  const normalized = raw
+    .replace(/\s/g, "")
+    .replace(/\.(?=\d{3}(\D|$))/g, "")
+    .replace(",", ".")
+    .replace(/[^\d.-]/g, "");
+
+  const n = Number(normalized);
+  return Number.isFinite(n) ? n : 0;
 }
 
-function normalizeDate(value: string) {
-  const trimmed = (value ?? "").trim();
-
-  if (/^\d{2}\/\d{2}\/\d{4}$/.test(trimmed)) {
-    const [dd, mm, yyyy] = trimmed.split("/");
-    return `${dd}${mm}${yyyy}`;
-  }
-
-  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-    const [yyyy, mm, dd] = trimmed.split("-");
-    return `${dd}${mm}${yyyy}`;
-  }
-
-  const digits = onlyDigits(trimmed);
-  if (digits.length === 8) {
-    return digits;
-  }
-
-  return "";
-}
-
-function todayDDMMAAAA() {
-  const d = new Date();
-  return lpad(d.getDate(), 2) + lpad(d.getMonth() + 1, 2) + d.getFullYear();
-}
-
-function nowHHMMSS() {
-  const d = new Date();
-  return lpad(d.getHours(), 2) + lpad(d.getMinutes(), 2) + lpad(d.getSeconds(), 2);
-}
-
-function money15(n: number) {
-  const cents = Math.round((n ?? 0) * 100);
+function money15(value: number): string {
+  const cents = Math.round((value || 0) * 100);
   return lpad(cents, 15, "0");
 }
 
-function money16(n: number) {
-  const cents = Math.round((n ?? 0) * 100);
-  return lpad(cents, 16, "0");
+function todayDDMMAAAA(now = new Date()): string {
+  return (
+    lpad(now.getDate(), 2) +
+    lpad(now.getMonth() + 1, 2) +
+    lpad(now.getFullYear(), 4)
+  );
 }
 
-function buildSantanderConvenio20(agencia: string, convenio: string) {
-  const banco4 = "0033";
-  const ag5 = lpad(onlyDigits(agencia).slice(0, 5), 5, "0");
-  const dvAg = " ";
-  const conta12 = lpad("0", 12, "0");
-  const dvConta = " ";
-  const dac = " ";
-
-  // Mantive o convênio completo no campo obrigatório e preenchi agência/conta em seus campos próprios.
-  // Para o convênio de 20 posições, usamos o número informado pela empresa, ajustado à largura do campo.
-  const conv = rpad(onlyDigits(convenio).slice(0, 20), 20, " ");
-  void ag5;
-  void dvAg;
-  void conta12;
-  void dvConta;
-  void dac;
-
-  return conv;
+function nowHHMMSS(now = new Date()): string {
+  return (
+    lpad(now.getHours(), 2) +
+    lpad(now.getMinutes(), 2) +
+    lpad(now.getSeconds(), 2)
+  );
 }
 
-function getContributorType(cnpjOrCpf: string) {
-  const digits = onlyDigits(cnpjOrCpf);
+function normalizeDateToDDMMAAAA(value: unknown): string {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(raw)) {
+    return onlyDigits(raw);
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    const [yyyy, mm, dd] = raw.split("-");
+    return `${dd}${mm}${yyyy}`;
+  }
+
+  const digits = onlyDigits(raw);
+  if (digits.length !== 8) return "";
+
+  if (/^(19|20)\d{6}$/.test(digits)) {
+    const yyyy = digits.slice(0, 4);
+    const mm = digits.slice(4, 6);
+    const dd = digits.slice(6, 8);
+    return `${dd}${mm}${yyyy}`;
+  }
+
+  return digits;
+}
+
+function isPastDateDDMMAAAA(ddmmyyyy: string): boolean {
+  if (!/^\d{8}$/.test(ddmmyyyy)) return true;
+
+  const dd = Number(ddmmyyyy.slice(0, 2));
+  const mm = Number(ddmmyyyy.slice(2, 4));
+  const yyyy = Number(ddmmyyyy.slice(4, 8));
+
+  const target = new Date(yyyy, mm - 1, dd);
+  target.setHours(0, 0, 0, 0);
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  return target.getTime() < today.getTime();
+}
+
+function typeInscricao1Digit(documento: string): string {
+  const digits = onlyDigits(documento);
+  if (digits.length === 11) return "1";
+  if (digits.length === 14) return "2";
+  return "0";
+}
+
+function typeInscricao2Digits(documento: string): string {
+  const digits = onlyDigits(documento);
   if (digits.length === 11) return "01";
   if (digits.length === 14) return "02";
   return "00";
 }
 
-function buildClientDocumentNumber(record: DarfRecord, seq: number) {
-  const codigo = onlyDigits(record.codigoReceita).slice(-6);
-  const referencia = onlyDigits(record.numeroReferencia).slice(-8);
-  return rpad(`DARF${codigo}${referencia}${lpad(seq, 3)}`, 20);
-}
-
-function sanitizeBankCode(value: string) {
-  const digits = onlyDigits(value);
-  return digits.length === 3 ? digits : "033";
-}
-
 /**
- * Santander CNAB 240 – Pagamento de Tributos e Impostos sem código de barras
- * Segmento N / DARF Normal (N2)
+ * G009
+ * BBBBAAAACCCCCCCCCCCC
+ * BBBB = 0033
+ * AAAA = agência sem DV
+ * CCCCCCCCCCCC = convênio alinhado à direita com zeros à esquerda
  */
+function buildConvenio20(agencia: string, convenio: string): string {
+  const banco4 = "0033";
+  const ag4 = lpad(onlyDigits(agencia).slice(0, 4), 4, "0");
+  const conv12 = lpad(onlyDigits(convenio).slice(0, 12), 12, "0");
+  return banco4 + ag4 + conv12;
+}
+
+function buildSeuNumero(record: DarfRecord, index: number): string {
+  const codigo = lpad(onlyDigits(record.codigoReceita).slice(0, 6), 6, "0");
+  const ref = lpad(onlyDigits(record.numeroReferencia).slice(0, 17), 17, "0");
+  const seed = `DARF${codigo}${ref}${lpad(index + 1, 5)}`;
+  return rpad(seed.slice(0, 20), 20);
+}
+
+function requireValue(value: string, label: string, index?: number) {
+  if (!value) {
+    const prefix = typeof index === "number" ? `DARF #${index + 1}: ` : "";
+    throw new Error(`${prefix}${label} não informado.`);
+  }
+}
+
+function buildHeaderArquivo(company: CompanyInfo, fileSequence: number, now: Date): string {
+  const cnpjEmpresa = onlyDigits(company.cnpj).slice(0, 14);
+  const tpInscricao = typeInscricao1Digit(cnpjEmpresa);
+  const convenio20 = buildConvenio20(company.agencia, company.convenio);
+
+  const agencia5 = lpad(onlyDigits(company.agencia).slice(0, 5), 5, "0");
+  const dvAgencia = rpad((company.dvAgencia || "").trim().slice(0, 1), 1, " ");
+  const conta12 = lpad(onlyDigits(company.conta).slice(0, 12), 12, "0");
+  const dvConta = rpad((company.dvConta || "").trim().slice(0, 1), 1, " ");
+  const nomeEmpresa = rpad(asciiSafe(company.empresa), 30);
+
+  const line = blank();
+  put(line, 1, 3, COD_BANCO);
+  put(line, 4, 7, "0000");
+  put(line, 8, 8, "0");
+  put(line, 9, 17, rpad("", 9));
+  put(line, 18, 18, tpInscricao);
+  put(line, 19, 32, lpad(cnpjEmpresa, 14));
+  put(line, 33, 52, convenio20);
+  put(line, 53, 57, agencia5);
+  put(line, 58, 58, dvAgencia);
+  put(line, 59, 70, conta12);
+  put(line, 71, 71, dvConta);
+  put(line, 72, 72, " ");
+  put(line, 73, 102, nomeEmpresa);
+  put(line, 103, 132, rpad("BANCO SANTANDER", 30));
+  put(line, 133, 142, rpad("", 10));
+  put(line, 143, 143, COD_REMESSA);
+  put(line, 144, 151, todayDDMMAAAA(now));
+  put(line, 152, 157, nowHHMMSS(now));
+  put(line, 158, 163, lpad(fileSequence, 6));
+  put(line, 164, 166, VERSAO_ARQUIVO);
+  put(line, 167, 171, "00000");
+  put(line, 172, 191, rpad("", 20));
+  put(line, 192, 211, rpad("", 20));
+  put(line, 212, 230, rpad("", 19));
+  put(line, 231, 240, rpad("", 10));
+  return line.join("");
+}
+
+function buildHeaderLote(company: CompanyInfo): string {
+  const cnpjEmpresa = onlyDigits(company.cnpj).slice(0, 14);
+  const tpInscricao = typeInscricao1Digit(cnpjEmpresa);
+  const convenio20 = buildConvenio20(company.agencia, company.convenio);
+
+  const agencia5 = lpad(onlyDigits(company.agencia).slice(0, 5), 5, "0");
+  const dvAgencia = rpad((company.dvAgencia || "").trim().slice(0, 1), 1, " ");
+  const conta12 = lpad(onlyDigits(company.conta).slice(0, 12), 12, "0");
+  const dvConta = rpad((company.dvConta || "").trim().slice(0, 1), 1, " ");
+  const nomeEmpresa = rpad(asciiSafe(company.empresa), 30);
+
+  const line = blank();
+  put(line, 1, 3, COD_BANCO);
+  put(line, 4, 7, LOTE);
+  put(line, 8, 8, "1");
+  put(line, 9, 9, "C");
+  put(line, 10, 11, TIPO_SERVICO);
+  put(line, 12, 13, FORMA_LANCAMENTO);
+  put(line, 14, 16, VERSAO_LOTE);
+  put(line, 17, 17, " ");
+  put(line, 18, 18, tpInscricao);
+  put(line, 19, 32, lpad(cnpjEmpresa, 14));
+  put(line, 33, 52, convenio20);
+  put(line, 53, 57, agencia5);
+  put(line, 58, 58, dvAgencia);
+  put(line, 59, 70, conta12);
+  put(line, 71, 71, dvConta);
+  put(line, 72, 72, " ");
+  put(line, 73, 102, nomeEmpresa);
+  put(line, 103, 142, rpad("", 40));
+  put(line, 143, 172, rpad("", 30));
+  put(line, 173, 177, "00000");
+  put(line, 178, 192, rpad("", 15));
+  put(line, 193, 212, rpad("", 20));
+  put(line, 213, 217, "00000");
+  put(line, 218, 220, "000");
+  put(line, 221, 222, rpad("", 2));
+  put(line, 223, 230, rpad("", 8));
+  put(line, 231, 240, rpad("", 10));
+  return line.join("");
+}
+
+function buildSegmentoN(record: DarfRecord, index: number, paymentDate: string, company: CompanyInfo): string {
+  const nomeContribuinte = rpad(asciiSafe(record.nome || company.empresa), 30);
+  const documentoContribuinte = onlyDigits(record.cnpj || company.cnpj).slice(0, 14);
+  const tipoIdentificacao = typeInscricao2Digits(documentoContribuinte);
+
+  const codigoReceita = lpad(onlyDigits(record.codigoReceita).slice(0, 6), 6, "0");
+  const periodoApuracao = normalizeDateToDDMMAAAA(record.periodoApuracao);
+  const numeroReferencia = lpad(onlyDigits(record.numeroReferencia).slice(0, 17), 17, "0");
+  const dataVencimento = normalizeDateToDDMMAAAA(record.dataVencimento);
+  const dataPagamento = normalizeDateToDDMMAAAA(paymentDate);
+
+  const valorPrincipal = parseNumber(record.valorPrincipal);
+  const valorMulta = parseNumber(record.valorMulta);
+  const valorJuros = parseNumber(record.valorJuros);
+  const valorTotalInformado = parseNumber(record.valorTotal);
+  const valorTotal =
+    valorTotalInformado > 0
+      ? valorTotalInformado
+      : Number((valorPrincipal + valorMulta + valorJuros).toFixed(2));
+
+  requireValue(nomeContribuinte.trim(), "Nome do contribuinte", index);
+  requireValue(documentoContribuinte, "CNPJ/CPF do contribuinte", index);
+  requireValue(codigoReceita.replace(/^0+$/, ""), "Código da receita", index);
+  requireValue(periodoApuracao, "Período de apuração", index);
+  requireValue(numeroReferencia.replace(/^0+$/, ""), "Número de referência", index);
+  requireValue(dataVencimento, "Data de vencimento", index);
+  requireValue(dataPagamento, "Data de pagamento", index);
+
+  if (isPastDateDDMMAAAA(dataPagamento)) {
+    throw new Error(
+      `DARF #${index + 1}: a data de pagamento ${dataPagamento} é inferior à data atual.`
+    );
+  }
+
+  if (valorPrincipal <= 0) {
+    throw new Error(`DARF #${index + 1}: valor principal inválido.`);
+  }
+
+  if (valorTotal <= 0) {
+    throw new Error(`DARF #${index + 1}: valor total inválido.`);
+  }
+
+  const line = blank();
+  put(line, 1, 3, COD_BANCO);
+  put(line, 4, 7, LOTE);
+  put(line, 8, 8, "3");
+  put(line, 9, 13, lpad(index + 1, 5));
+  put(line, 14, 14, "N");
+  put(line, 15, 15, TIPO_MOVIMENTO);
+  put(line, 16, 17, INSTRUCAO_MOVIMENTO);
+  put(line, 18, 37, rpad(buildSeuNumero(record, index), 20));
+  put(line, 38, 57, rpad("", 20));
+  put(line, 58, 87, nomeContribuinte);
+  put(line, 88, 95, dataPagamento);
+  put(line, 96, 110, money15(valorTotal));
+
+  // N2 - DARF Normal
+  put(line, 111, 116, codigoReceita);
+  put(line, 117, 118, tipoIdentificacao);
+  put(line, 119, 132, lpad(documentoContribuinte, 14));
+  put(line, 133, 134, CODIGO_IDENTIFICACAO_TRIBUTO);
+  put(line, 135, 142, periodoApuracao);
+  put(line, 143, 159, numeroReferencia);
+  put(line, 160, 174, money15(valorPrincipal));
+  put(line, 175, 189, money15(valorMulta));
+  put(line, 190, 204, money15(valorJuros));
+  put(line, 205, 212, dataVencimento);
+  put(line, 213, 230, rpad("", 18));
+  put(line, 231, 240, rpad("", 10));
+
+  return line.join("");
+}
+
+function buildTrailerLote(totalRegistrosLote: number, somatoriaValores: number): string {
+  const line = blank();
+  put(line, 1, 3, COD_BANCO);
+  put(line, 4, 7, LOTE);
+  put(line, 8, 8, "5");
+  put(line, 9, 17, rpad("", 9));
+  put(line, 18, 23, lpad(totalRegistrosLote, 6));
+  put(line, 24, 41, lpad(Math.round(somatoriaValores * 100), 18, "0"));
+  put(line, 42, 59, "000000000000000000");
+  put(line, 60, 65, "000000");
+  put(line, 66, 230, rpad("", 165));
+  put(line, 231, 240, rpad("", 10));
+  return line.join("");
+}
+
+function buildTrailerArquivo(totalRegistrosArquivo: number): string {
+  const line = blank();
+  put(line, 1, 3, COD_BANCO);
+  put(line, 4, 7, "9999");
+  put(line, 8, 8, "9");
+  put(line, 9, 17, rpad("", 9));
+  put(line, 18, 23, "000001");
+  put(line, 24, 29, lpad(totalRegistrosArquivo, 6));
+  put(line, 30, 240, rpad("", 211));
+  return line.join("");
+}
+
 export function generateSantanderRemittance(
   company: CompanyInfo,
   darfs: DarfRecord[],
-  paymentDate: string,
-  fileSequence = 11,
-) {
-  if (!darfs.length) {
+  paymentDate: string
+): string {
+  if (!Array.isArray(darfs) || darfs.length === 0) {
     throw new Error("Nenhum DARF informado para geração da remessa.");
   }
 
-  const dataPagamento = normalizeDate(paymentDate);
-  if (!dataPagamento) {
-    throw new Error("Data de pagamento inválida.");
+  const paymentDateNorm = normalizeDateToDDMMAAAA(paymentDate);
+  if (!paymentDateNorm) {
+    throw new Error("Data de pagamento não informada no formulário.");
   }
 
-  const COD_BANCO = sanitizeBankCode(company.banco);
-  const LOTE = "0001";
-  const TIPO_SERVICO = "22";
-  const FORMA_LANCAMENTO = "16";
-  const VERSAO_LOTE = "010";
-  const VERSAO_ARQUIVO = "060";
-
-  const cnpjEmpresa = onlyDigits(company.cnpj).slice(0, 14);
-  const tipoInscricaoEmpresa = cnpjEmpresa.length === 14 ? "2" : "1";
-
-  const convenio20 = buildSantanderConvenio20(company.agencia, company.convenio);
-  const agencia = lpad(onlyDigits(company.agencia).slice(0, 5), 5, "0");
-  const dvAgencia = rpad((company.dvAgencia ?? " ").slice(0, 1), 1);
-  const conta = lpad(onlyDigits(company.conta).slice(0, 12), 12, "0");
-  const dvConta = rpad((company.dvConta ?? " ").slice(0, 1), 1);
-
-  const nomeEmpresa = rpad(asciiSafe(company.empresa ?? ""), 30);
-  const nomeBanco = rpad("BANCO SANTANDER", 30);
-
-  const dataGeracao = todayDDMMAAAA();
-  const horaGeracao = nowHHMMSS();
-  const numeroSequencialArquivo = lpad(fileSequence, 6, "0");
-
-  // HEADER ARQUIVO
-  const H = blank();
-  put(H, 1, 3, COD_BANCO);
-  put(H, 4, 7, "0000");
-  put(H, 8, 8, "0");
-  put(H, 9, 17, rpad("", 9));
-  put(H, 18, 18, tipoInscricaoEmpresa);
-  put(H, 19, 32, lpad(cnpjEmpresa, 14));
-  put(H, 33, 52, convenio20);
-  put(H, 53, 57, agencia);
-  put(H, 58, 58, dvAgencia);
-  put(H, 59, 70, conta);
-  put(H, 71, 71, dvConta);
-  put(H, 72, 72, " ");
-  put(H, 73, 102, nomeEmpresa);
-  put(H, 103, 132, nomeBanco);
-  put(H, 133, 142, rpad("", 10));
-  put(H, 143, 143, "1");
-  put(H, 144, 151, dataGeracao);
-  put(H, 152, 157, horaGeracao);
-  put(H, 158, 163, numeroSequencialArquivo);
-  put(H, 164, 166, VERSAO_ARQUIVO);
-  put(H, 167, 171, "00000");
-  put(H, 172, 191, rpad("", 20));
-  put(H, 192, 211, rpad("", 20));
-  put(H, 212, 230, rpad("", 19));
-  put(H, 231, 240, rpad("", 10));
-
-  // HEADER LOTE
-  const HL = blank();
-  put(HL, 1, 3, COD_BANCO);
-  put(HL, 4, 7, LOTE);
-  put(HL, 8, 8, "1");
-  put(HL, 9, 9, "C");
-  put(HL, 10, 11, TIPO_SERVICO);
-  put(HL, 12, 13, FORMA_LANCAMENTO);
-  put(HL, 14, 16, VERSAO_LOTE);
-  put(HL, 17, 17, " ");
-  put(HL, 18, 18, tipoInscricaoEmpresa);
-  put(HL, 19, 32, lpad(cnpjEmpresa, 14));
-  put(HL, 33, 52, convenio20);
-  put(HL, 53, 57, agencia);
-  put(HL, 58, 58, dvAgencia);
-  put(HL, 59, 70, conta);
-  put(HL, 71, 71, dvConta);
-  put(HL, 72, 72, " ");
-  put(HL, 73, 102, nomeEmpresa);
-  put(HL, 103, 142, rpad("", 40));
-  put(HL, 143, 172, rpad("", 30));
-  put(HL, 173, 177, "00000");
-  put(HL, 178, 192, rpad("", 15));
-  put(HL, 193, 212, rpad("", 20));
-  put(HL, 213, 217, "00000");
-  put(HL, 218, 220, "000");
-  put(HL, 221, 222, rpad("", 2));
-  put(HL, 223, 230, rpad("", 8));
-  put(HL, 231, 240, rpad("", 10));
-
-  // DETALHES SEGMENTO N
-  let seq = 1;
-  let somaTotal = 0;
-  const detalhes: string[] = [];
-
-  for (const record of darfs) {
-    const contribuinte = onlyDigits(record.cnpj).slice(0, 14);
-    const tipoContribuinte = getContributorType(record.cnpj);
-    const periodoApuracao = normalizeDate(record.periodoApuracao);
-    const dataVencimento = normalizeDate(record.dataVencimento);
-
-    if (!periodoApuracao) {
-      throw new Error(`Período de apuração inválido no DARF ${record.codigoReceita}.`);
-    }
-
-    if (!dataVencimento) {
-      throw new Error(`Data de vencimento inválida no DARF ${record.codigoReceita}.`);
-    }
-
-    const D = blank();
-    put(D, 1, 3, COD_BANCO);
-    put(D, 4, 7, LOTE);
-    put(D, 8, 8, "3");
-    put(D, 9, 13, lpad(seq, 5));
-    put(D, 14, 14, "N");
-    put(D, 15, 15, "0");
-    put(D, 16, 17, "00");
-    put(D, 18, 37, buildClientDocumentNumber(record, seq));
-    put(D, 38, 57, rpad("", 20));
-    put(D, 58, 87, rpad(asciiSafe(record.nome || company.empresa), 30));
-    put(D, 88, 95, dataPagamento);
-    put(D, 96, 110, money15(record.valorTotal));
-
-    // N2 - DARF NORMAL
-    put(D, 111, 116, lpad(onlyDigits(record.codigoReceita).slice(0, 6), 6));
-    put(D, 117, 118, tipoContribuinte);
-    put(D, 119, 132, lpad(contribuinte, 14));
-    put(D, 133, 134, "16");
-    put(D, 135, 142, periodoApuracao);
-    put(D, 143, 159, lpad(onlyDigits(record.numeroReferencia).slice(0, 17), 17));
-    put(D, 160, 174, money15(record.valorPrincipal));
-    put(D, 175, 189, money15(record.valorMulta));
-    put(D, 190, 204, money15(record.valorJuros));
-    put(D, 205, 212, dataVencimento);
-    put(D, 213, 230, rpad("", 18));
-    put(D, 231, 240, rpad("", 10));
-
-    detalhes.push(D.join(""));
-    somaTotal += record.valorTotal || 0;
-    seq += 1;
+  if (isPastDateDDMMAAAA(paymentDateNorm)) {
+    throw new Error("A data de pagamento informada é inferior à data atual.");
   }
 
-  // TRAILER LOTE
-  const TL = blank();
-  put(TL, 1, 3, COD_BANCO);
-  put(TL, 4, 7, LOTE);
-  put(TL, 8, 8, "5");
-  put(TL, 9, 17, rpad("", 9));
-  put(TL, 18, 23, lpad(1 + detalhes.length + 1, 6));
-  put(TL, 24, 41, money16(somaTotal));
-  put(TL, 42, 59, "0".repeat(18));
-  put(TL, 60, 65, "000000");
-  put(TL, 66, 230, rpad("", 165));
-  put(TL, 231, 240, rpad("", 10));
+  const now = new Date();
+  const fileSequence = 11; // evita faixa 1-10 que pode ser tratada como teste
 
-  // TRAILER ARQUIVO
-  const TA = blank();
-  put(TA, 1, 3, COD_BANCO);
-  put(TA, 4, 7, "9999");
-  put(TA, 8, 8, "9");
-  put(TA, 9, 17, rpad("", 9));
-  put(TA, 18, 23, lpad(1, 6));
-  put(TA, 24, 29, lpad(1 + 1 + detalhes.length + 1 + 1, 6));
-  put(TA, 30, 240, rpad("", 211));
+  const headerArquivo = buildHeaderArquivo(company, fileSequence, now);
+  const headerLote = buildHeaderLote(company);
 
-  return [H.join(""), HL.join(""), ...detalhes, TL.join(""), TA.join("")].join("\r\n");
+  const detalhes = darfs.map((record, index) =>
+    buildSegmentoN(record, index, paymentDateNorm, company)
+  );
+
+  const somatoriaValores = darfs.reduce((acc, record) => {
+    const principal = parseNumber(record.valorPrincipal);
+    const multa = parseNumber(record.valorMulta);
+    const juros = parseNumber(record.valorJuros);
+    const totalInformado = parseNumber(record.valorTotal);
+    const total =
+      totalInformado > 0 ? totalInformado : Number((principal + multa + juros).toFixed(2));
+    return acc + total;
+  }, 0);
+
+  const totalRegistrosLote = 1 + detalhes.length + 1;
+  const trailerLote = buildTrailerLote(totalRegistrosLote, somatoriaValores);
+
+  const totalRegistrosArquivo = 1 + 1 + detalhes.length + 1 + 1;
+  const trailerArquivo = buildTrailerArquivo(totalRegistrosArquivo);
+
+  return [headerArquivo, headerLote, ...detalhes, trailerLote, trailerArquivo].join("\r\n");
 }

@@ -4,7 +4,6 @@
 import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import type { CompanyInfo, DarfRecord } from "@/types/darf";
 import { generateSantanderRemittance } from "@/utils/remittance";
-import { validateSantanderRemittance } from "@/utils/cnab240Validator";
 
 function formatCurrency(value: number) {
   return value.toLocaleString("pt-BR", {
@@ -181,17 +180,6 @@ export default function Page() {
     try {
       const remittance = generateSantanderRemittance(company, darfs, paymentDate);
 
-      const diag = validateSantanderRemittance(remittance, {
-        expectedBankCode: company.banco,
-        expectedServiceType: "22",
-        expectedLaunchType: "16",
-        expectedPaymentDate: paymentDate,
-        uiTotal: summary.totalGeral,
-      });
-
-      setDiagNotes(diag.notes);
-      setDiagErrors(diag.errors);
-
       const blob = new Blob([remittance], {
         type: "text/plain;charset=utf-8",
       });
@@ -209,11 +197,7 @@ export default function Page() {
       link.remove();
       URL.revokeObjectURL(url);
 
-      setValidationMessage(
-        diag.ok
-          ? "Arquivo de remessa gerado e validado com sucesso!"
-          : "Arquivo gerado com observações — verifique o mini-validador.",
-      );
+      setValidationMessage("Arquivo de remessa gerado com sucesso!");
     } catch (error) {
       const message =
         error instanceof Error
